@@ -112,24 +112,6 @@ class RisingWaveConnOptions:
         return f"host={self.host} port={self.port} user={self.user} password={self.password} dbname={self.database} sslmode={self.ssl}"
 
 
-class RisingWaveConnectionManager:
-
-    _insert_ctx: dict[str, InsertContext]
-    # conn_pool: ConnectionPool
-    dsn: str
-
-    def __init__(self, options: RisingWaveConnOptions):
-        self.dsn = options.dsn
-        # self.conn_pool = ConnectionPool(conninfo=options.dsn, max_size=64)
-
-    def acquire(self):
-        
-        # return RisingWaveConnection(conn=self.conn_pool.getconn())
-        return RisingWaveConnection(psycopg2.connect(self.dsn))
-
-    def close(self):
-        self.conn_pool.close()
-
 
 class RisingWaveConnection:
 
@@ -318,19 +300,19 @@ class Subscription:
                 logging.info(f"subscription {self.sub_name} is interrupted")
                 break
 
-class RisingWave:
+class RisingWave(RisingWaveConnection):
 
     local_risingwave: subprocess.Popen
 
     options: RisingWaveConnOptions
-
-    conn_manager: RisingWaveConnectionManager
 
     def __init__(self, conn_options: RisingWaveConnOptions = None):
         self.local_risingwave = None
         self.options = conn_options
 
         self.open()
+
+        RisingWaveConnection.__init__(self=self, conn=self._connect())
 
     def open(self):
         if self.options is None:
@@ -352,10 +334,8 @@ class RisingWave:
             )
 
         def try_connect():
-            self.conn_manager = RisingWaveConnectionManager(self.options)
-
             # wait for the meta service is up
-            with self.conn_manager.acquire() as conn:
+            with self.getconn() as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS _wavekit_version (version INT PRIMARY KEY)"
                 )
@@ -363,8 +343,11 @@ class RisingWave:
 
         _retry(try_connect, 500, 60)
 
-    def connection(self):
-        return self.conn_manager.acquire()
+    def _connect(self):
+        return psycopg2.connect(self.options.dsn)
+
+    def getconn(self):
+        return RisingWaveConnection(self._connect())
 
     def close(self):
         self.conn_manager.close()
@@ -393,7 +376,7 @@ class RisingWave:
             A MaterializedView object.
         """
 
-        mv = MaterializedView(self.conn_manager.acquire(), name, stmt)
+        mv = MaterializedView(self.getconn(), name, stmt)
         mv._create()
 
         return mv

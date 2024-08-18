@@ -13,9 +13,7 @@ def run(*fs):
 if __name__ == "__main__":
     rw = RisingWave() # if the connection info is not provided, it will try to start RisingWave in your local machine. 
 
-    conn = rw.connection()
-
-    conn.execute(
+    rw.execute(
         query="""
             CREATE TABLE IF NOT EXISTS usdm_futures_klins_1m (
                 symbol     STRING,
@@ -30,7 +28,7 @@ if __name__ == "__main__":
 
     def handle_binance_klines_update(data):
         k = data["data"]["k"]
-        conn.insert(
+        rw.insert(
             table_name="usdm_futures_klins_1m",
             symbol=k["s"],
             timestamp=datetime.fromtimestamp(k["t"] / 1000),
