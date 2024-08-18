@@ -11,7 +11,7 @@ def run(*fs):
 
 
 if __name__ == "__main__":
-    rw = RisingWave()
+    rw = RisingWave() # if the connection info is not provided, it will try to start RisingWave in your local machine. 
 
     conn = rw.connection()
 
