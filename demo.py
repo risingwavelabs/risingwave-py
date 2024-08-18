@@ -14,7 +14,7 @@ if __name__ == "__main__":
     rw = RisingWave() # if the connection info is not provided, it will try to start RisingWave in your local machine. 
 
     rw.execute(
-        query="""
+        sql="""
             CREATE TABLE IF NOT EXISTS usdm_futures_klins_1m (
                 symbol     STRING,
                 timestamp  TIMESTAMPTZ,

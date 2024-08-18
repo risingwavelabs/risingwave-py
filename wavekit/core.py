@@ -122,41 +122,41 @@ class RisingWaveConnection:
         self.conn = conn
         self._insert_ctx = dict()
 
-    def execute(self, query: str, *args):
+    def execute(self, sql: str, *args):
         try:
             with self.conn.cursor() as cursor:
-                cursor.execute(query, args)
-            logging.debug(f"[wavekit] successfully executed query: {query}")
+                cursor.execute(sql, args)
+            logging.debug(f"[wavekit] successfully executed sql: {sql}")
         except Exception as e:
-            logging.debug(f"[wavekit] failed to exeute query: {query}, exception: {e}")
+            logging.debug(f"[wavekit] failed to exeute sql: {sql}, exception: {e}")
             raise e
 
-    def fetch(self, query: str, *args):
+    def fetch(self, sql: str, *args):
         try:
             with self.conn.cursor() as cursor:
-                cursor.execute(query, args)
+                cursor.execute(sql, args)
                 result = cursor.fetchall()
-            logging.debug(f"[wavekit] successfully fetched result, query: {query}")
+            logging.debug(f"[wavekit] successfully fetched result, query: {sql}")
             return result
         except Exception as e:
             logging.debug(
-                f"[wavekit] failed to fetch result, query: {query}, exception: {e}"
+                f"[wavekit] failed to fetch result, query: {sql}, exception: {e}"
             )
             raise e
 
-    def fetchone(self, query: str, *args):
+    def fetchone(self, sql: str, *args):
         try:
             with self.conn.cursor() as cursor:
-                cursor.execute(query, args)
+                cursor.execute(sql, args)
                 result = cursor.fetchone()
             cursor.close()
             logging.debug(
-                f"[wavekit] successfully fetched the last row, query: {query}"
+                f"[wavekit] successfully fetched the last row, query: {sql}"
             )
             return result
         except Exception as e:
             logging.debug(
-                f"[wavekit] failed to fetch the last row, query: {query}, exception: {e}"
+                f"[wavekit] failed to fetch the last row, query: {sql}, exception: {e}"
             )
             raise e
         
