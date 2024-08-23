@@ -8,11 +8,7 @@ from shutil import which
 from datetime import datetime
 from typing import Callable, Awaitable, Any
 
-# from psycopg_pool import ConnectionPool
-# from psycopg import Connection
 import psycopg2
-# from psycopg2 import connection
-
 
 SubscriptionHandler = Callable[[Any], Awaitable[None]]
 
@@ -32,29 +28,18 @@ def _retry(f, interval_ms: int, times: int):
             time.sleep(interval_ms / 1000)
     raise RuntimeError(f"failed to retry function, last exception is {ee}, set logging level to DEBUG for more details")
 
-
 class InsertContext:
-
-    risingwave_conn: 'RisingWaveConnection'
-    buf_size: int
-    data_buf: list
-    valid_cols: list
-    stmt: str
-    row_template: str
-
-    bulk_insert_func: Callable
-    insert_func: Callable
-
     def __init__(self, risingwave_conn: 'RisingWaveConnection', table_name: str, buf_size: int=5):
         result = risingwave_conn.fetch(
             f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}';"
         )
-        self.risingwave_conn = risingwave_conn
+        self.risingwave_conn: 'RisingWaveConnection' = risingwave_conn
         cols = [row[0] for row in result]
-        self.stmt = f"INSERT INTO {table_name} ({str.join(",", cols)}) VALUES "
-        self.row_template = f"({str.join(",", [f"{{{col}}}" for col in cols])})"
-        self.data_buf = []
-        self.valid_cols = cols
+        self.stmt: str = f"INSERT INTO {table_name} ({str.join(",", cols)}) VALUES "
+        self.row_template: str = f"({str.join(",", [f"{{{col}}}" for col in cols])})"
+        self.data_buf: list = []
+        self.valid_cols: list = cols
+        self.buf_size: int = buf_size
 
         def bulk_insert(**kwargs):
             self.data_buf.append(kwargs)
@@ -65,8 +50,8 @@ class InsertContext:
             self.data_buf.append(kwargs)
             self.flush()
 
-        self.bulk_insert_func = bulk_insert
-        self.insert_func = insert
+        self.bulk_insert_func: Callable = bulk_insert
+        self.insert_func: Callable = insert
 
 
     def flush(self):
@@ -96,12 +81,12 @@ class RisingWaveConnOptions:
         database: str,
         ssl: str = "disable",
     ):
-        self.host = host
-        self.port = port
-        self.user = user
-        self.password = password
-        self.database = database
-        self.ssl = ssl
+        self.host: str = host
+        self.port: int = port
+        self.user: str = user
+        self.password: str = password
+        self.database: str = database
+        self.ssl: str = ssl
 
     @property
     def dsn(self) -> str:
@@ -111,16 +96,10 @@ class RisingWaveConnOptions:
     def conn_info(self) -> str:
         return f"host={self.host} port={self.port} user={self.user} password={self.password} dbname={self.database} sslmode={self.ssl}"
 
-
-
 class RisingWaveConnection:
-
-    _insert_ctx: dict[str, InsertContext]
-    conn: Any
-
     def __init__(self, conn):
-        self.conn = conn
-        self._insert_ctx = dict()
+        self.conn: Any = conn
+        self._insert_ctx: dict[str, InsertContext] = dict()
 
     def execute(self, sql: str, *args):
         try:
@@ -183,21 +162,17 @@ class RisingWaveConnection:
 
 
 class MaterializedView:
-
-    # A dedicated connection for fetching the subscription
-    conn: RisingWaveConnection
-
-    # The number of the subscription
-    sub_count: int
-
-    # The name of the materialized view
-    name: str
-
     def __init__(self, conn: RisingWaveConnection, name: str, stmt: str):
-        self.conn = conn
-        self.name = name
-        self.stmt = stmt
-        self.sub_count = 0
+        # A dedicated connection for fetching the subscription
+        self.conn: RisingWaveConnection = conn
+
+        # The name of the materialized view
+        self.name: str = name
+
+        self.stmt: str = stmt
+        # The number of the subscription
+        self.sub_count: int = 0
+
         atexit.register(self.conn.close)
 
     def _create(self, ignore_exist: bool = True):
@@ -249,10 +224,10 @@ class Subscription:
         mv_name: str,
         exactly_once: bool = False,
     ):
-        self.conn = conn
-        self.sub_name = sub_name
-        self.handler = handler
-        self.exactly_once = exactly_once
+        self.conn: RisingWaveConnection = conn
+        self.sub_name: str = sub_name
+        self.handler: SubscriptionHandler = handler
+        self.exactly_once: bool = exactly_once
         self.conn.execute(
             f"CREATE SUBSCRIPTION IF NOT EXISTS {self.sub_name} FROM {mv_name} WITH (retention = '1D')"
         )
@@ -301,14 +276,9 @@ class Subscription:
                 break
 
 class RisingWave(RisingWaveConnection):
-
-    local_risingwave: subprocess.Popen
-
-    options: RisingWaveConnOptions
-
     def __init__(self, conn_options: RisingWaveConnOptions = None):
-        self.local_risingwave = None
-        self.options = conn_options
+        self.local_risingwave: subprocess.Popen = None
+        self.options: RisingWaveConnOptions = conn_options
 
         self.open()
 

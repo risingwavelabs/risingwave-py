@@ -26,7 +26,7 @@ Python SDK for real-time data processing with RisingWave.
 3. Run the demo
     ```shell
     source ./venv/bin/activate
-    python demo.py
+    python demo.py simple
     ```
 
 ## Development
