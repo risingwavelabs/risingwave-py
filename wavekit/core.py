@@ -51,20 +51,29 @@ class InsertContext:
     def __init__(
         self,
         risingwave_conn: "RisingWaveConnection",
-        table_name: str,
+        full_table_name: str,
         buf_size: int = 5,
     ):
+        # Extract schema and table name
+        if "." in full_table_name:
+            schema, table = full_table_name.split(".")
+        else:
+            schema = "public"  # Default schema
+            table = full_table_name
+
         result = risingwave_conn.fetch(
-            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}';"
+            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}' and table_schema = '{schema}'"
         )
         self.risingwave_conn: "RisingWaveConnection" = risingwave_conn
         cols = [row[0] for row in result]
-        self.stmt: str = f"INSERT INTO {table_name} ({str.join(',', cols)}) VALUES "
+        self.stmt: str = (
+            f"INSERT INTO {full_table_name} ({str.join(',', cols)}) VALUES "
+        )
         self.row_template: str = f"({str.join(',', [f'{{{col}}}' for col in cols])})"
         self.data_buf: list = []
         self.valid_cols: list = cols
         self.buf_size: int = buf_size
-        self.table_name = table_name
+        self.full_table_name = full_table_name
 
         def bulk_insert(**kwargs):
             self.data_buf.append(kwargs)
@@ -85,7 +94,7 @@ class InsertContext:
             for k in self.valid_cols:
                 if k not in data:
                     logging.warn(
-                        f"[wavekit] missing column {k} when inserting into table: {self.table_name}. Fill NULL for insertion."
+                        f"[wavekit] missing column {k} when inserting into table: {self.full_table_name}. Fill NULL for insertion."
                     )
                     item[k] = "NULL"
                 elif type(data[k]) == str or type(data[k]) == datetime:
@@ -128,9 +137,10 @@ class RisingWaveConnOptions:
 
 
 class RisingWaveConnection:
-    def __init__(self, conn):
+    def __init__(self, conn, rw_version):
         self.conn: Any = conn
         self._insert_ctx: dict[str, InsertContext] = dict()
+        self.rw_version = rw_version
 
     def execute(self, sql: str, *args):
         try:
@@ -189,6 +199,54 @@ class RisingWaveConnection:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
+    def on_change(
+        self,
+        upstream_name: str,
+        handler: SubscriptionHandler,
+        sub_name: str = "",
+        retention_seconds=86400,
+        persist_progress=False,
+    ):
+        """
+        Crate a subscription subscribing the change of the materialized view.
+        If the subscription already exists, it will skip the creation.
+
+        Parameters
+        ----------
+        handler : (data: Any) -> None
+            The function to handle the change of the materialized view.
+        table_name : str
+            The name of the table to insert the data.
+        sub_name : str
+            The name of the subscription. It is for distinguishing different subscriptions.
+            If not specified, a default name will be used.
+        retention_seconds : int
+            The retention time of the subscription.
+        persist_progress : bool
+            If True, the progress of the subscription will be saved in the database.
+
+        Returns
+        -------
+        None
+        """
+        if self.rw_version < "2.0.0":
+            raise RuntimeError(
+                "on_change is not supported in RisingWave version <= 2.0.0. Please upgrade RisingWave."
+            )
+
+        if sub_name == "":
+            sub_name = f"{upstream_name}_sub"
+
+        sub = Subscription(
+            conn=self,
+            handler=handler,
+            sub_name=sub_name,
+            upstream_name=upstream_name,
+            retention_seconds=retention_seconds,
+            persist_progress=persist_progress,
+        )
+        sub._run()
+
 
 class MaterializedView:
     def __init__(
@@ -226,38 +284,13 @@ class MaterializedView:
         retention_seconds=86400,
         persist_progress=False,
     ):
-        """
-        Crate a subscription subscribing the change of the materialized view.
-        If the subscription already exists, it will skip the creation.
-
-        Parameters
-        ----------
-        handler : (data: Any) -> None
-            The function to handle the change of the materialized view.
-        sub_name : str
-            The name of the subscription. It is for distinguishing different subscriptions.
-            If not specified, a default name will be used.
-        Returns
-        -------
-        None
-        """
-        if self.rw_version < "2.0.0":
-            raise RuntimeError(
-                "on_change is not supported in RisingWave version <= 2.0.0. Please upgrade RisingWave."
-            )
-
-        if sub_name == "":
-            sub_name = f"sub_{self.name}"
-
-        sub = Subscription(
-            conn=self.conn,
+        self.conn.on_change(
+            upstream_name=self.name,
             handler=handler,
             sub_name=sub_name,
-            mv_name=self.name,
             retention_seconds=retention_seconds,
             persist_progress=persist_progress,
         )
-        sub._run()
 
 
 class Subscription:
@@ -266,7 +299,7 @@ class Subscription:
         conn: RisingWaveConnection,
         handler: SubscriptionHandler,
         sub_name: str,
-        mv_name: str,
+        upstream_name: str,
         retention_seconds: int,
         persist_progress: bool = True,
     ):
@@ -275,7 +308,7 @@ class Subscription:
         self.handler: SubscriptionHandler = handler
         self.persist_progress: bool = persist_progress
         self.conn.execute(
-            f"CREATE SUBSCRIPTION IF NOT EXISTS {self.sub_name} FROM {mv_name} WITH (retention = 'f{retention_seconds}s')"
+            f"CREATE SUBSCRIPTION IF NOT EXISTS {self.sub_name} FROM {upstream_name} WITH (retention = '{retention_seconds}s')"
         )
 
         if self.persist_progress:
@@ -288,7 +321,7 @@ class Subscription:
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
-        cursor_name = f"wavekitcur_{self.sub_name}_{cursor_name}"
+        cursor_name = f"{self.sub_name}_wavekit_{cursor_name}"
 
         if self.persist_progress:
             progress_row = self.conn.fetchone(
@@ -327,11 +360,12 @@ class RisingWave(RisingWaveConnection):
     def __init__(self, conn_options: RisingWaveConnOptions = None):
         self.local_risingwave: subprocess.Popen = None
         self.options: RisingWaveConnOptions = conn_options
-        self.rw_version = None
-
+        self.rw_version = DEFAULT_RW_VERSION
         self.open()
 
-        RisingWaveConnection.__init__(self=self, conn=self._connect())
+        RisingWaveConnection.__init__(
+            self=self, conn=self._connect(), rw_version=self.rw_version
+        )
 
     def open(self):
         if self.options is None:
@@ -363,13 +397,13 @@ class RisingWave(RisingWaveConnection):
                 logging.info(f"connected to RisingWave. Version: {version}")
                 self.rw_version = extract_rw_version(version)
 
-        _retry(try_connect, 500, 60)
+        return _retry(try_connect, 500, 60)
 
     def _connect(self):
         return psycopg2.connect(self.options.dsn)
 
     def getconn(self):
-        return RisingWaveConnection(self._connect())
+        return RisingWaveConnection(self._connect(), self.rw_version)
 
     def close(self):
         self.conn_manager.close()
