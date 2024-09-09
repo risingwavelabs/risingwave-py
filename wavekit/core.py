@@ -1,3 +1,4 @@
+import sys
 import time
 import logging
 import atexit
@@ -9,7 +10,8 @@ from shutil import which
 from datetime import datetime
 from typing import Callable, Awaitable, Any
 
-import psycopg2
+from sqlalchemy import create_engine, Engine, text, Connection
+import pandas as pd
 
 SubscriptionHandler = Callable[[Any], Awaitable[None]]
 
@@ -51,29 +53,29 @@ class InsertContext:
     def __init__(
         self,
         risingwave_conn: "RisingWaveConnection",
-        full_table_name: str,
+        table_name: str,
+        schema_name: str,
         buf_size: int = 5,
     ):
-        # Extract schema and table name
-        if "." in full_table_name:
-            schema, table = full_table_name.split(".")
-        else:
-            schema = "public"  # Default schema
-            table = full_table_name
-
         result = risingwave_conn.fetch(
-            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}' and table_schema = '{schema}'"
+            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}' and table_schema = '{schema_name}'"
         )
+        if result is None or len(result) == 0:
+            raise RuntimeError(
+                f"table {table_name} does not exist in schema {schema_name}. Please create the table first."
+            )
+
         self.risingwave_conn: "RisingWaveConnection" = risingwave_conn
         cols = [row[0] for row in result]
         self.stmt: str = (
-            f"INSERT INTO {full_table_name} ({str.join(',', cols)}) VALUES "
+            f"INSERT INTO {schema_name}.{table_name} ({str.join(',', cols)}) VALUES "
         )
         self.row_template: str = f"({str.join(',', [f'{{{col}}}' for col in cols])})"
         self.data_buf: list = []
         self.valid_cols: list = cols
         self.buf_size: int = buf_size
-        self.full_table_name = full_table_name
+        self.schema_name = schema_name
+        self.table_name = table_name
 
         def bulk_insert(**kwargs):
             self.data_buf.append(kwargs)
@@ -129,7 +131,7 @@ class RisingWaveConnOptions:
 
     @property
     def dsn(self) -> str:
-        return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}?sslmode={self.ssl}"
+        return f"risingwave://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}?sslmode={self.ssl}"
 
     @property
     def conn_info(self) -> str:
@@ -138,14 +140,14 @@ class RisingWaveConnOptions:
 
 class RisingWaveConnection:
     def __init__(self, conn, rw_version):
-        self.conn: Any = conn
+        self.conn: Connection = conn
         self._insert_ctx: dict[str, InsertContext] = dict()
         self.rw_version = rw_version
 
     def execute(self, sql: str, *args):
         try:
-            with self.conn.cursor() as cursor:
-                cursor.execute(sql, args)
+            cursor = self.conn.execute(text(sql), args)
+            cursor.close()
             logging.info(f"[wavekit] successfully executed sql: {sql}")
         except Exception as e:
             logging.error(f"[wavekit] failed to exeute sql: {sql}, exception: {e}")
@@ -153,8 +155,7 @@ class RisingWaveConnection:
 
     def fetch(self, sql: str, *args):
         try:
-            with self.conn.cursor() as cursor:
-                cursor.execute(sql, args)
+            with self.conn.execute(text(sql), args) as cursor:
                 result = cursor.fetchall()
             logging.debug(f"[wavekit] successfully fetched result, query: {sql}")
             return result
@@ -166,10 +167,8 @@ class RisingWaveConnection:
 
     def fetchone(self, sql: str, *args):
         try:
-            with self.conn.cursor() as cursor:
-                cursor.execute(sql, args)
+            with self.conn.execute(text(sql), args) as cursor:
                 result = cursor.fetchone()
-            cursor.close()
             logging.debug(f"[wavekit] successfully fetched the last row, query: {sql}")
             return result
         except Exception as e:
@@ -178,20 +177,50 @@ class RisingWaveConnection:
             )
             raise e
 
-    def bulk_insert(self, table_name: str, **cols):
-        if table_name not in self._insert_ctx:
-            self._insert_ctx[table_name] = InsertContext(self, table_name)
-        ctx = self._insert_ctx[table_name]
-        return ctx.bulk_insert_func(**cols)
+    def insert(
+        self,
+        data: pd.DataFrame,
+        table_name: str,
+        schema_name: str = "public",
+        force_flush=True,
+    ):
+        # TODO: add support for bulk insert for DataFrame
+        # For now, we need to make sure the `insert_row` buffer is cleared before inserting DataFrame
+        fully_qual_table_name = f"{schema_name}.{table_name}"
+        if table_name in self._insert_ctx:
+            self._insert_ctx[fully_qual_table_name].flush()
 
-    def insert(self, table_name: str, **cols):
+        data.to_sql(
+            name=table_name,
+            schema=schema_name,
+            con=self.conn,
+            if_exists="append",
+            method="multi",
+            index=False,
+        )
+
+    def insert_row(
+        self, table_name: str, schema_name: str = "public", force_flush=True, **cols
+    ):
+        fully_qual_table_name = f"{schema_name}.{table_name}"
         if table_name not in self._insert_ctx:
-            self._insert_ctx[table_name] = InsertContext(self, table_name)
-        ctx = self._insert_ctx[table_name]
-        return ctx.insert_func(**cols)
+            self._insert_ctx[fully_qual_table_name] = InsertContext(
+                self, table_name, schema_name
+            )
+        ctx = self._insert_ctx[fully_qual_table_name]
+        if force_flush:
+            return ctx.insert_func(**cols)
+        else:
+            return ctx.bulk_insert_func(**cols)
+
+    def check_exist(self, name: str, schema_name: str = "public"):
+        result = self.fetch(
+            f"SELECT * FROM information_schema.tables WHERE table_name = '{name}' and table_schema = '{schema_name}'"
+        )
+        return result is not None and len(result) > 0
 
     def close(self):
-        self.conn.close()
+        pass
 
     def __enter__(self):
         return self
@@ -201,11 +230,13 @@ class RisingWaveConnection:
 
     def on_change(
         self,
-        upstream_name: str,
+        subscribe_from: str,
         handler: SubscriptionHandler,
+        schema_name: str = "public",
         sub_name: str = "",
         retention_seconds=86400,
         persist_progress=False,
+        error_if_not_exist=False,
     ):
         """
         Crate a subscription subscribing the change of the materialized view.
@@ -215,8 +246,8 @@ class RisingWaveConnection:
         ----------
         handler : (data: Any) -> None
             The function to handle the change of the materialized view.
-        table_name : str
-            The name of the table to insert the data.
+        subscribe_from : str
+            The name of the table/MV to listen on changes.
         sub_name : str
             The name of the subscription. It is for distinguishing different subscriptions.
             If not specified, a default name will be used.
@@ -231,17 +262,29 @@ class RisingWaveConnection:
         """
         if self.rw_version < "2.0.0":
             raise RuntimeError(
-                "on_change is not supported in RisingWave version <= 2.0.0. Please upgrade RisingWave."
+                "on_change is not supported in RisingWave version < 2.0.0. Please upgrade RisingWave."
             )
 
+        def check_exist():
+            if not self.check_exist(name=subscribe_from, schema_name=schema_name):
+                raise RuntimeError(
+                    f"table {subscribe_from} does not exist in schema {schema_name}. Please create the table first."
+                )
+
+        if error_if_not_exist:
+            check_exist()
+        else:
+            _retry(check_exist, 1000, sys.maxsize)
+
         if sub_name == "":
-            sub_name = f"{upstream_name}_sub"
+            sub_name = f"{subscribe_from}_sub"
 
         sub = Subscription(
             conn=self,
             handler=handler,
+            schema_name=schema_name,
             sub_name=sub_name,
-            upstream_name=upstream_name,
+            subscribe_from=subscribe_from,
             retention_seconds=retention_seconds,
             persist_progress=persist_progress,
         )
@@ -250,7 +293,12 @@ class RisingWaveConnection:
 
 class MaterializedView:
     def __init__(
-        self, conn: RisingWaveConnection, name: str, stmt: str, rw_version: str
+        self,
+        conn: RisingWaveConnection,
+        schema_name: str,
+        name: str,
+        stmt: str,
+        rw_version: str,
     ):
         # A dedicated connection for fetching the subscription
         self.conn: RisingWaveConnection = conn
@@ -258,6 +306,7 @@ class MaterializedView:
         # The name of the materialized view
         self.name: str = name
 
+        self.schema_name: str = schema_name
         self.stmt: str = stmt
         self.rw_version: str = rw_version
 
@@ -265,16 +314,16 @@ class MaterializedView:
 
     def _create(self, ignore_exist: bool = True):
         if ignore_exist:
-            sql = f"CREATE MATERIALIZED VIEW IF NOT EXISTS {self.name} AS {self.stmt}"
+            sql = f"CREATE MATERIALIZED VIEW IF NOT EXISTS {self.schema_name}.{self.name} AS {self.stmt}"
         else:
-            sql = f"CREATE MATERIALIZED VIEW {self.name} AS {self.stmt}"
+            sql = f"CREATE MATERIALIZED VIEW {self.schema_name}.{self.name} AS {self.stmt}"
         return self.conn.execute(sql)
 
     def _delete(self, ignore_not_exist: bool = True):
         if ignore_not_exist:
-            sql = f"DROP MATERIALIZED VIEW IF EXISTS {self.name}"
+            sql = f"DROP MATERIALIZED VIEW IF EXISTS {self.schema_name}.{self.name}"
         else:
-            sql = f"DROP MATERIALIZED VIEW {self.name}"
+            sql = f"DROP MATERIALIZED VIEW {self.schema_name}.{self.name}"
         return self.conn.execute(sql)
 
     def on_change(
@@ -285,7 +334,8 @@ class MaterializedView:
         persist_progress=False,
     ):
         self.conn.on_change(
-            upstream_name=self.name,
+            subscribe_from=self.name,
+            schema_name=self.schema_name,
             handler=handler,
             sub_name=sub_name,
             retention_seconds=retention_seconds,
@@ -298,17 +348,19 @@ class Subscription:
         self,
         conn: RisingWaveConnection,
         handler: SubscriptionHandler,
+        schema_name: str,
         sub_name: str,
-        upstream_name: str,
+        subscribe_from: str,
         retention_seconds: int,
         persist_progress: bool = True,
     ):
         self.conn: RisingWaveConnection = conn
         self.sub_name: str = sub_name
+        self.schema_name: str = schema_name
         self.handler: SubscriptionHandler = handler
         self.persist_progress: bool = persist_progress
         self.conn.execute(
-            f"CREATE SUBSCRIPTION IF NOT EXISTS {self.sub_name} FROM {upstream_name} WITH (retention = '{retention_seconds}s')"
+            f"CREATE SUBSCRIPTION IF NOT EXISTS {self.schema_name}.{self.sub_name} FROM {self.schema_name}.{subscribe_from} WITH (retention = '{retention_seconds}s')"
         )
 
         if self.persist_progress:
@@ -321,23 +373,24 @@ class Subscription:
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
-        cursor_name = f"{self.sub_name}_wavekit_{cursor_name}"
+        cursor_name = f"{self.schema_name}.wavekit_cursor_{cursor_name}_{self.sub_name}"
+        fully_qual_sub_name = f"{self.schema_name}.{self.sub_name}"
 
         if self.persist_progress:
             progress_row = self.conn.fetchone(
-                f"SELECT progress FROM wavekit_sub_progress WHERE sub_name = '{self.sub_name}'"
+                f"SELECT progress FROM wavekit_sub_progress WHERE sub_name = '{fully_qual_sub_name}'"
             )
             if progress_row is not None:
                 self.conn.execute(
-                    f"DECLARE {cursor_name} subscription cursor for {self.sub_name} SINCE {progress_row[0]}"
+                    f"DECLARE {cursor_name} subscription cursor for {fully_qual_sub_name} SINCE {progress_row[0]}"
                 )
             else:
                 self.conn.execute(
-                    f"DECLARE {cursor_name} subscription cursor for {self.sub_name}"
+                    f"DECLARE {cursor_name} subscription cursor for {fully_qual_sub_name}"
                 )
         else:
             self.conn.execute(
-                f"DECLARE {cursor_name} subscription cursor for {self.sub_name}"
+                f"DECLARE {cursor_name} subscription cursor for {fully_qual_sub_name}"
             )
         while True:
             try:
@@ -349,10 +402,10 @@ class Subscription:
                 if self.persist_progress:
                     progress = data[-1]
                     self.conn.execute(
-                        f"INSERT INTO wavekit_sub_progress (sub_name, progress) VALUES ('{self.sub_name}', {progress})"
+                        f"INSERT INTO wavekit_sub_progress (sub_name, progress) VALUES ('{fully_qual_sub_name}', {progress})"
                     )
             except KeyboardInterrupt:
-                logging.info(f"subscription {self.sub_name} is interrupted")
+                logging.info(f"subscription {fully_qual_sub_name} is interrupted")
                 break
 
 
@@ -361,6 +414,7 @@ class RisingWave(RisingWaveConnection):
         self.local_risingwave: subprocess.Popen = None
         self.options: RisingWaveConnOptions = conn_options
         self.rw_version = DEFAULT_RW_VERSION
+        self.engine = None
         self.open()
 
         RisingWaveConnection.__init__(
@@ -388,6 +442,7 @@ class RisingWave(RisingWaveConnection):
 
         def try_connect():
             # wait for the meta service is up
+            self.engine = self._create_engine()
             with self.getconn() as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS _wavekit_version (version INT PRIMARY KEY)"
@@ -399,8 +454,11 @@ class RisingWave(RisingWaveConnection):
 
         return _retry(try_connect, 500, 60)
 
+    def _create_engine(self) -> Engine:
+        return create_engine(self.options.dsn)
+
     def _connect(self):
-        return psycopg2.connect(self.options.dsn)
+        return self.engine.connect()
 
     def getconn(self):
         return RisingWaveConnection(self._connect(), self.rw_version)
@@ -413,7 +471,8 @@ class RisingWave(RisingWaveConnection):
     def mv(
         self,
         stmt: str,
-        name: str = "default",
+        name: str,
+        schema_name: str = "public",
     ) -> MaterializedView:
         """
         Create a new materialized view.
@@ -432,7 +491,7 @@ class RisingWave(RisingWaveConnection):
             A MaterializedView object.
         """
 
-        mv = MaterializedView(self.getconn(), name, stmt, self.rw_version)
+        mv = MaterializedView(self.getconn(), schema_name, name, stmt, self.rw_version)
         mv._create()
 
         return mv
