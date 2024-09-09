@@ -3,6 +3,7 @@ import logging
 import atexit
 import subprocess
 import traceback
+import re
 
 from shutil import which
 from datetime import datetime
@@ -13,6 +14,7 @@ import psycopg2
 SubscriptionHandler = Callable[[Any], Awaitable[None]]
 
 DEFAULT_CURSOR_IDLE_INTERVAL_MS = 100
+DEFAULT_RW_VERSION = "1.7.0"
 
 
 def _retry(f, interval_ms: int, times: int):
@@ -26,20 +28,43 @@ def _retry(f, interval_ms: int, times: int):
             logging.warn(f"retrying function, exception: {e}, {traceback.format_exc()}")
             cnt += 1
             time.sleep(interval_ms / 1000)
-    raise RuntimeError(f"failed to retry function, last exception is {ee}, set logging level to DEBUG for more details")
+    raise RuntimeError(
+        f"failed to retry function, last exception is {ee}, set logging level to DEBUG for more details"
+    )
+
+
+def extract_rw_version(sql_version_output: str) -> str:
+    # Define the regular expression pattern to extract only the version string x.x.x
+    pattern = r"RisingWave-(\d+\.\d+\.\d+)"
+
+    # Compile the regular expression
+    regex = re.compile(pattern)
+
+    # Search for the pattern in the input string
+    match = regex.search(sql_version_output)
+
+    # Return the matched version string if found, else return None
+    return match.group(1) if match else DEFAULT_RW_VERSION
+
 
 class InsertContext:
-    def __init__(self, risingwave_conn: 'RisingWaveConnection', table_name: str, buf_size: int=5):
+    def __init__(
+        self,
+        risingwave_conn: "RisingWaveConnection",
+        table_name: str,
+        buf_size: int = 5,
+    ):
         result = risingwave_conn.fetch(
             f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}';"
         )
-        self.risingwave_conn: 'RisingWaveConnection' = risingwave_conn
+        self.risingwave_conn: "RisingWaveConnection" = risingwave_conn
         cols = [row[0] for row in result]
-        self.stmt: str = f"INSERT INTO {table_name} ({str.join(",", cols)}) VALUES "
-        self.row_template: str = f"({str.join(",", [f"{{{col}}}" for col in cols])})"
+        self.stmt: str = f"INSERT INTO {table_name} ({str.join(',', cols)}) VALUES "
+        self.row_template: str = f"({str.join(',', [f'{{{col}}}' for col in cols])})"
         self.data_buf: list = []
         self.valid_cols: list = cols
         self.buf_size: int = buf_size
+        self.table_name = table_name
 
         def bulk_insert(**kwargs):
             self.data_buf.append(kwargs)
@@ -53,23 +78,28 @@ class InsertContext:
         self.bulk_insert_func: Callable = bulk_insert
         self.insert_func: Callable = insert
 
-
     def flush(self):
         valid_data = []
         for data in self.data_buf:
             item = dict()
             for k in self.valid_cols:
                 if k not in data:
-                    item[k] = None
-                if type(data[k]) == str or type(data[k]) == datetime:
+                    logging.warn(
+                        f"[wavekit] missing column {k} when inserting into table: {self.table_name}. Fill NULL for insertion."
+                    )
+                    item[k] = "NULL"
+                elif type(data[k]) == str or type(data[k]) == datetime:
                     item[k] = f"'{data[k]}'"
                 else:
                     item[k] = data[k]
             valid_data.append(item)
-        stmt = self.stmt + str.join(",", [self.row_template.format(**data) for data in valid_data])
+        stmt = self.stmt + str.join(
+            ",", [self.row_template.format(**data) for data in valid_data]
+        )
         self.risingwave_conn.execute(stmt)
         self.risingwave_conn.execute("FLUSH")
         self.data_buf = []
+
 
 class RisingWaveConnOptions:
     def __init__(
@@ -91,10 +121,11 @@ class RisingWaveConnOptions:
     @property
     def dsn(self) -> str:
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}?sslmode={self.ssl}"
-    
+
     @property
     def conn_info(self) -> str:
         return f"host={self.host} port={self.port} user={self.user} password={self.password} dbname={self.database} sslmode={self.ssl}"
+
 
 class RisingWaveConnection:
     def __init__(self, conn):
@@ -105,9 +136,9 @@ class RisingWaveConnection:
         try:
             with self.conn.cursor() as cursor:
                 cursor.execute(sql, args)
-            logging.debug(f"[wavekit] successfully executed sql: {sql}")
+            logging.info(f"[wavekit] successfully executed sql: {sql}")
         except Exception as e:
-            logging.debug(f"[wavekit] failed to exeute sql: {sql}, exception: {e}")
+            logging.error(f"[wavekit] failed to exeute sql: {sql}, exception: {e}")
             raise e
 
     def fetch(self, sql: str, *args):
@@ -118,7 +149,7 @@ class RisingWaveConnection:
             logging.debug(f"[wavekit] successfully fetched result, query: {sql}")
             return result
         except Exception as e:
-            logging.debug(
+            logging.error(
                 f"[wavekit] failed to fetch result, query: {sql}, exception: {e}"
             )
             raise e
@@ -129,22 +160,20 @@ class RisingWaveConnection:
                 cursor.execute(sql, args)
                 result = cursor.fetchone()
             cursor.close()
-            logging.debug(
-                f"[wavekit] successfully fetched the last row, query: {sql}"
-            )
+            logging.debug(f"[wavekit] successfully fetched the last row, query: {sql}")
             return result
         except Exception as e:
-            logging.debug(
+            logging.error(
                 f"[wavekit] failed to fetch the last row, query: {sql}, exception: {e}"
             )
             raise e
-        
+
     def bulk_insert(self, table_name: str, **cols):
         if table_name not in self._insert_ctx:
             self._insert_ctx[table_name] = InsertContext(self, table_name)
         ctx = self._insert_ctx[table_name]
         return ctx.bulk_insert_func(**cols)
-    
+
     def insert(self, table_name: str, **cols):
         if table_name not in self._insert_ctx:
             self._insert_ctx[table_name] = InsertContext(self, table_name)
@@ -162,7 +191,9 @@ class RisingWaveConnection:
 
 
 class MaterializedView:
-    def __init__(self, conn: RisingWaveConnection, name: str, stmt: str):
+    def __init__(
+        self, conn: RisingWaveConnection, name: str, stmt: str, rw_version: str
+    ):
         # A dedicated connection for fetching the subscription
         self.conn: RisingWaveConnection = conn
 
@@ -170,6 +201,8 @@ class MaterializedView:
         self.name: str = name
 
         self.stmt: str = stmt
+        self.rw_version: str = rw_version
+
         # The number of the subscription
         self.sub_count: int = 0
 
@@ -205,15 +238,22 @@ class MaterializedView:
         -------
         None
         """
+        if self.rw_version < "2.0.0":
+            raise RuntimeError(
+                "on_change is not supported in RisingWave version <= 2.0.0. Please upgrade RisingWave."
+            )
+
         if self.sub_count == 0:
             sub_name = f"sub_{self.name}"
         else:
             sub_name = f"sub_{self.name}_{self.sub_count}"
         self.sub_count += 1
 
-        sub = Subscription(conn=self.conn, handler=handler, sub_name=sub_name, mv_name=self.name)
+        sub = Subscription(
+            conn=self.conn, handler=handler, sub_name=sub_name, mv_name=self.name
+        )
         sub._run()
-        
+
 
 class Subscription:
     def __init__(
@@ -222,7 +262,7 @@ class Subscription:
         handler: SubscriptionHandler,
         sub_name: str,
         mv_name: str,
-        exactly_once: bool = False,
+        exactly_once: bool = True,
     ):
         self.conn: RisingWaveConnection = conn
         self.sub_name: str = sub_name
@@ -234,7 +274,7 @@ class Subscription:
 
         if self.exactly_once:
             self.conn.execute(
-                query=f"CREATE TABLE IF NOT EXISTS wavekit_sub_progress (sub_name STRING PRIMARY KEY, progress BIGINT)"
+                "CREATE TABLE IF NOT EXISTS wavekit_sub_progress (sub_name STRING PRIMARY KEY, progress BIGINT) ON CONFLICT OVERWRITE"
             )
 
     def _run(
@@ -268,17 +308,19 @@ class Subscription:
                     continue
                 self.handler(data)
                 if self.exactly_once:
+                    progress = data[-1]
                     self.conn.execute(
-                        f"UPDATE wavekit_sub_progress SET progress = {data[0]} WHERE sub_name = '{self.sub_name}'"
-                    )
+                        f"INSERT INTO wavekit_sub_progress (sub_name, progress) VALUES ('{self.sub_name}', {progress})")
             except KeyboardInterrupt:
                 logging.info(f"subscription {self.sub_name} is interrupted")
                 break
+
 
 class RisingWave(RisingWaveConnection):
     def __init__(self, conn_options: RisingWaveConnOptions = None):
         self.local_risingwave: subprocess.Popen = None
         self.options: RisingWaveConnOptions = conn_options
+        self.rw_version = None
 
         self.open()
 
@@ -310,6 +352,9 @@ class RisingWave(RisingWaveConnection):
                     "CREATE TABLE IF NOT EXISTS _wavekit_version (version INT PRIMARY KEY)"
                 )
                 conn.execute("INSERT INTO _wavekit_version (version) VALUES (1)")
+                version = conn.fetchone("SELECT version()")[0]
+                logging.info(f"connected to RisingWave. Version: {version}")
+                self.rw_version = extract_rw_version(version)
 
         _retry(try_connect, 500, 60)
 
@@ -346,7 +391,7 @@ class RisingWave(RisingWaveConnection):
             A MaterializedView object.
         """
 
-        mv = MaterializedView(self.getconn(), name, stmt)
+        mv = MaterializedView(self.getconn(), name, stmt, self.rw_version)
         mv._create()
 
         return mv
@@ -354,4 +399,3 @@ class RisingWave(RisingWaveConnection):
 
 if __name__ == "__main__":
     pass
-

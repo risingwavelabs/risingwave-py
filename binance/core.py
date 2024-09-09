@@ -5,17 +5,19 @@ import traceback
 
 BINANCE_WS_BASE_URL = "wss://fstream.binance.com"
 
-# websocket.enableTrace(True)
+websocket.enableTrace(True)
 
 
 def subscribe_bars(streams: list, handler, encoder=json.loads):
     if not streams:
         raise ValueError("symbols must not be empty")
     
-    url = f"{BINANCE_WS_BASE_URL}/stream?streams={str.join(
-        "/", 
-        [str.lower(s) for s in streams]
-    )}"
+    # url = f"{BINANCE_WS_BASE_URL}/stream?streams={str.join(
+    #     "/", 
+    #     [str.lower(s) for s in streams]
+    # )}"
+    url = f"{BINANCE_WS_BASE_URL}/stream?streams={str.join('/', [str.lower(s) for s in streams])}"
+
 
     logging.info(f"binance subscription URL: {url}")
 
