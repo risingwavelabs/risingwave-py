@@ -5,7 +5,7 @@ import traceback
 
 BINANCE_WS_BASE_URL = "wss://fstream.binance.com"
 
-websocket.enableTrace(True)
+# websocket.enableTrace(True)
 
 
 def subscribe_bars(streams: list, handler, encoder=json.loads):

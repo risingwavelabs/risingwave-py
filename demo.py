@@ -132,7 +132,7 @@ if __name__ == "__main__":
         print("  e.g. python demo.py simple\n")
         print(
             "Available demos:"
-            + "\n  simple: a simple demo that subscribes to Binance klines and streams them to the console."
+            + "\n  simple: a simple demo that subscribes to synthetic cryto trading data and output to consle."
             + "\n  boll: a demo that subscribes to Binance klines and calculates Bollinger Bands."
         )
         sys.exit(1)
