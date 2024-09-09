@@ -203,9 +203,6 @@ class MaterializedView:
         self.stmt: str = stmt
         self.rw_version: str = rw_version
 
-        # The number of the subscription
-        self.sub_count: int = 0
-
         atexit.register(self.conn.close)
 
     def _create(self, ignore_exist: bool = True):
@@ -222,7 +219,13 @@ class MaterializedView:
             sql = f"DROP MATERIALIZED VIEW {self.name}"
         return self.conn.execute(sql)
 
-    def on_change(self, handler: SubscriptionHandler, sub_name: str = ""):
+    def on_change(
+        self,
+        handler: SubscriptionHandler,
+        sub_name: str = "",
+        retention_seconds=86400,
+        persist_progress=False,
+    ):
         """
         Crate a subscription subscribing the change of the materialized view.
         If the subscription already exists, it will skip the creation.
@@ -243,14 +246,16 @@ class MaterializedView:
                 "on_change is not supported in RisingWave version <= 2.0.0. Please upgrade RisingWave."
             )
 
-        if self.sub_count == 0:
+        if sub_name == "":
             sub_name = f"sub_{self.name}"
-        else:
-            sub_name = f"sub_{self.name}_{self.sub_count}"
-        self.sub_count += 1
 
         sub = Subscription(
-            conn=self.conn, handler=handler, sub_name=sub_name, mv_name=self.name
+            conn=self.conn,
+            handler=handler,
+            sub_name=sub_name,
+            mv_name=self.name,
+            retention_seconds=retention_seconds,
+            persist_progress=persist_progress,
         )
         sub._run()
 
@@ -262,17 +267,18 @@ class Subscription:
         handler: SubscriptionHandler,
         sub_name: str,
         mv_name: str,
-        exactly_once: bool = True,
+        retention_seconds: int,
+        persist_progress: bool = True,
     ):
         self.conn: RisingWaveConnection = conn
         self.sub_name: str = sub_name
         self.handler: SubscriptionHandler = handler
-        self.exactly_once: bool = exactly_once
+        self.persist_progress: bool = persist_progress
         self.conn.execute(
-            f"CREATE SUBSCRIPTION IF NOT EXISTS {self.sub_name} FROM {mv_name} WITH (retention = '1D')"
+            f"CREATE SUBSCRIPTION IF NOT EXISTS {self.sub_name} FROM {mv_name} WITH (retention = 'f{retention_seconds}s')"
         )
 
-        if self.exactly_once:
+        if self.persist_progress:
             self.conn.execute(
                 "CREATE TABLE IF NOT EXISTS wavekit_sub_progress (sub_name STRING PRIMARY KEY, progress BIGINT) ON CONFLICT OVERWRITE"
             )
@@ -284,7 +290,7 @@ class Subscription:
     ):
         cursor_name = f"wavekitcur_{self.sub_name}_{cursor_name}"
 
-        if self.exactly_once:
+        if self.persist_progress:
             progress_row = self.conn.fetchone(
                 f"SELECT progress FROM wavekit_sub_progress WHERE sub_name = '{self.sub_name}'"
             )
@@ -307,10 +313,11 @@ class Subscription:
                     time.sleep(wait_interval_ms / 1000)
                     continue
                 self.handler(data)
-                if self.exactly_once:
+                if self.persist_progress:
                     progress = data[-1]
                     self.conn.execute(
-                        f"INSERT INTO wavekit_sub_progress (sub_name, progress) VALUES ('{self.sub_name}', {progress})")
+                        f"INSERT INTO wavekit_sub_progress (sub_name, progress) VALUES ('{self.sub_name}', {progress})"
+                    )
             except KeyboardInterrupt:
                 logging.info(f"subscription {self.sub_name} is interrupted")
                 break
