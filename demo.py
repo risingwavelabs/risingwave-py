@@ -30,14 +30,35 @@ def generate_tick_data():
     )
 
 
+class DemoHandler:
+    import pandas as pd
+
+    # Callback when receiving changes from tick
+    # Simply print the new tick data
+    def on_tick_changes(data):
+        print(f"Received new tick: {data}")
+
+    # Callback when receiving changes from tick_analytics
+    # Print the new average price if the avg price for a symbol in the last 10s is greater than 300
+    def on_tick_analytics_changes(data: pd.DataFrame):
+        for _, row in data.iterrows():
+            # Print the new average price if the avg price for a symbol in the last 10s is greater than 300
+            if (row["op"] == "UpdateInsert" or row["op"] == "Insert") and row[
+                "avg_price"
+            ] >= 300:
+                print(
+                    f"{row['window_start']} - {row['window_end']}: {row['symbol']} avg price {row['avg_price']} exceeds 300"
+                )
+
+
 def demo_simple():
-    from wavekit import RisingWave
+    from wavekit import RisingWave, OutputFormat
     import time
 
     # Init logging
     logging.basicConfig(filename="wavekit.log", level=logging.INFO)
 
-    # if the connection info is not provided, it will try to start RisingWave in your local machine.
+    # rw = RisingWave()
     rw = RisingWave()
 
     # Create a schema and a table for demo
@@ -56,8 +77,9 @@ def demo_simple():
         rw.on_change(
             schema_name="wavekit_demo",
             subscribe_from="tick",
+            output_format=OutputFormat.RAW,
             persist_progress=True,
-            handler=lambda data: print(data),
+            handler=DemoHandler.on_tick_changes,
         )
 
     # Create a materialized view for tick analytics and subscribe to the updates
@@ -68,10 +90,15 @@ def demo_simple():
         rw.mv(
             schema_name="wavekit_demo",
             name="tick_analytics",
-            stmt="SELECT symbol, sum(volume) FROM wavekit_demo.tick group by symbol",
-        ).on_change(lambda data: print(data))
+            stmt="""SELECT window_start, window_end, symbol, avg(close) as avg_price 
+                    FROM tumble(wavekit_demo.tick, timestamp, interval '10 seconds') 
+                    GROUP BY window_start, window_end, symbol""",
+        ).on_change(
+            handler=DemoHandler.on_tick_analytics_changes,
+            output_format=OutputFormat.DATAFRAME,
+        )
 
-    run(produce_tick, subscribe_tick_analytics)
+    run(subscribe_tick_analytics, subscribe_tick_stream, produce_tick)
 
 
 def demo_boll():

@@ -7,4 +7,5 @@ typing_extensions==4.12.2
 urllib3==2.2.2
 websocket-client==1.8.0
 pandas==2.2.2
-sqlalchemy-risingwave=1.1.0
+sqlalchemy-risingwave==1.1.0
+semver==3.0.2

@@ -5,7 +5,9 @@ import atexit
 import subprocess
 import traceback
 import re
+import semver
 
+from enum import Enum
 from shutil import which
 from datetime import datetime
 from typing import Callable, Awaitable, Any
@@ -35,7 +37,7 @@ def _retry(f, interval_ms: int, times: int):
     )
 
 
-def extract_rw_version(sql_version_output: str) -> str:
+def extract_rw_version(sql_version_output: str) -> semver.Version:
     # Define the regular expression pattern to extract only the version string x.x.x
     pattern = r"RisingWave-(\d+\.\d+\.\d+)"
 
@@ -45,8 +47,16 @@ def extract_rw_version(sql_version_output: str) -> str:
     # Search for the pattern in the input string
     match = regex.search(sql_version_output)
 
-    # Return the matched version string if found, else return None
-    return match.group(1) if match else DEFAULT_RW_VERSION
+    # Return the matched version if found, else return default version
+    version = semver.Version.parse(DEFAULT_RW_VERSION)
+    try:
+        version = semver.Version.parse(match.group(1))
+    except Exception as e:
+        logging.error(
+            f"failed to extract RisingWave version from {sql_version_output}, exception: {e}"
+        )
+
+    return version
 
 
 class InsertContext:
@@ -113,8 +123,18 @@ class InsertContext:
 
 
 class RisingWaveConnOptions:
-    def __init__(
-        self,
+    def __init__(self, conn_str: str):
+        if conn_str.startswith("postgresql://"):
+            conn_str = conn_str.replace("postgresql://", "risingwave://")
+        elif not conn_str.startswith("risingwave://"):
+            raise ValueError(
+                "connection string must start with 'risingwave://' or 'postgresql://'"
+            )
+        self.dsn = conn_str
+
+    @classmethod
+    def from_connection_info(
+        cls,
         host: str,
         port: int,
         user: str,
@@ -122,27 +142,17 @@ class RisingWaveConnOptions:
         database: str,
         ssl: str = "disable",
     ):
-        self.host: str = host
-        self.port: int = port
-        self.user: str = user
-        self.password: str = password
-        self.database: str = database
-        self.ssl: str = ssl
+        return cls(f"risingwave://{user}:{password}@{host}:{port}/{database}?sslmode={ssl}")
 
-    @property
-    def dsn(self) -> str:
-        return f"risingwave://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}?sslmode={self.ssl}"
-
-    @property
-    def conn_info(self) -> str:
-        return f"host={self.host} port={self.port} user={self.user} password={self.password} dbname={self.database} sslmode={self.ssl}"
-
+class OutputFormat(Enum):
+    RAW = 1
+    DATAFRAME = 2
 
 class RisingWaveConnection:
     def __init__(self, conn, rw_version):
         self.conn: Connection = conn
         self._insert_ctx: dict[str, InsertContext] = dict()
-        self.rw_version = rw_version
+        self.rw_version: semver.Version = rw_version
 
     def execute(self, sql: str, *args):
         try:
@@ -153,10 +163,12 @@ class RisingWaveConnection:
             logging.error(f"[wavekit] failed to exeute sql: {sql}, exception: {e}")
             raise e
 
-    def fetch(self, sql: str, *args):
+    def fetch(self, sql: str, format = OutputFormat.RAW, *args):
         try:
             with self.conn.execute(text(sql), args) as cursor:
                 result = cursor.fetchall()
+                if format == OutputFormat.DATAFRAME:
+                    result = pd.DataFrame(data=result, columns=cursor.keys())
             logging.debug(f"[wavekit] successfully fetched result, query: {sql}")
             return result
         except Exception as e:
@@ -165,11 +177,12 @@ class RisingWaveConnection:
             )
             raise e
 
-    def fetchone(self, sql: str, *args):
+    def fetchone(self, sql: str, format = OutputFormat.RAW, *args):
         try:
             with self.conn.execute(text(sql), args) as cursor:
                 result = cursor.fetchone()
-            logging.debug(f"[wavekit] successfully fetched the last row, query: {sql}")
+                if format == OutputFormat.DATAFRAME and result is not None:
+                    result = pd.DataFrame(data=[result], columns=cursor.keys())
             return result
         except Exception as e:
             logging.error(
@@ -232,6 +245,7 @@ class RisingWaveConnection:
         self,
         subscribe_from: str,
         handler: SubscriptionHandler,
+        output_format: OutputFormat = OutputFormat.RAW,
         schema_name: str = "public",
         sub_name: str = "",
         retention_seconds=86400,
@@ -260,7 +274,8 @@ class RisingWaveConnection:
         -------
         None
         """
-        if self.rw_version < "2.0.0":
+        MINIMAL_SUBSCRIPTION_RW_VERSION = semver.Version.parse("2.0.0")
+        if self.rw_version < MINIMAL_SUBSCRIPTION_RW_VERSION:
             raise RuntimeError(
                 "on_change is not supported in RisingWave version < 2.0.0. Please upgrade RisingWave."
             )
@@ -288,7 +303,7 @@ class RisingWaveConnection:
             retention_seconds=retention_seconds,
             persist_progress=persist_progress,
         )
-        sub._run()
+        sub._run(output_format)
 
 
 class MaterializedView:
@@ -298,7 +313,7 @@ class MaterializedView:
         schema_name: str,
         name: str,
         stmt: str,
-        rw_version: str,
+        rw_version: semver.Version,
     ):
         # A dedicated connection for fetching the subscription
         self.conn: RisingWaveConnection = conn
@@ -308,7 +323,7 @@ class MaterializedView:
 
         self.schema_name: str = schema_name
         self.stmt: str = stmt
-        self.rw_version: str = rw_version
+        self.rw_version: semver.Version = rw_version
 
         atexit.register(self.conn.close)
 
@@ -329,6 +344,7 @@ class MaterializedView:
     def on_change(
         self,
         handler: SubscriptionHandler,
+        output_format: OutputFormat = OutputFormat.RAW,
         sub_name: str = "",
         retention_seconds=86400,
         persist_progress=False,
@@ -340,6 +356,7 @@ class MaterializedView:
             sub_name=sub_name,
             retention_seconds=retention_seconds,
             persist_progress=persist_progress,
+            output_format=output_format
         )
 
 
@@ -370,6 +387,7 @@ class Subscription:
 
     def _run(
         self,
+        output_format: OutputFormat,
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
@@ -394,13 +412,16 @@ class Subscription:
             )
         while True:
             try:
-                data = self.conn.fetchone(f"FETCH NEXT FROM {cursor_name}")
-                if data is None:
+                data = self.conn.fetchone(f"FETCH NEXT FROM {cursor_name}", format=output_format)
+                if data is None or len(data) == 0:
                     time.sleep(wait_interval_ms / 1000)
                     continue
                 self.handler(data)
                 if self.persist_progress:
-                    progress = data[-1]
+                    if output_format == OutputFormat.DATAFRAME:
+                        progress = data['rw_timestamp'].iloc[0]
+                    else:
+                        progress = data[-1]
                     self.conn.execute(
                         f"INSERT INTO wavekit_sub_progress (sub_name, progress) VALUES ('{fully_qual_sub_name}', {progress})"
                     )
@@ -413,7 +434,7 @@ class RisingWave(RisingWaveConnection):
     def __init__(self, conn_options: RisingWaveConnOptions = None):
         self.local_risingwave: subprocess.Popen = None
         self.options: RisingWaveConnOptions = conn_options
-        self.rw_version = DEFAULT_RW_VERSION
+        self.rw_version: semver.Version = DEFAULT_RW_VERSION
         self.engine = None
         self.open()
 
@@ -436,7 +457,7 @@ class RisingWave(RisingWaveConnection):
                 text=True,
             )
             atexit.register(self.local_risingwave.kill)
-            self.options = RisingWaveConnOptions(
+            self.options = RisingWaveConnOptions.from_connection_info(
                 host="localhost", port=4566, user="root", password="", database="dev"
             )
 
