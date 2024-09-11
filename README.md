@@ -4,7 +4,7 @@ Python SDK for real-time data processing with RisingWave.
 
 ## Quick start
 
-### 1. Install wavekit
+### 1. Install wavekit ([PyPI](https://pypi.org/project/wavekit/))
 ```bash
 pip install wavekit
 ```
