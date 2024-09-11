@@ -22,6 +22,8 @@ risingwave
 ./risingwave
 ```
 
+You can also provision a free-tier cluster in [RisingWave Cloud](https://cloud.risingwave.com/auth/signin/)
+
 ### 3. Interact with RisingWave via wavekit in Python
 #### Initialization
 ```python
