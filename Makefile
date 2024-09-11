@@ -21,15 +21,10 @@ prepare-venv:
 	@echo 'source ${VENV_DIR}/bin/activate'
 	@echo "=============================================="
 
-build-dashboard:
-	cd ${PROJECT_DIR}/dashboard && pnpm i && pnpm build
-	rm -r ${PROJECT_DIR}/llmo/dashboard
-	mv ${PROJECT_DIR}/dashboard/out ${PROJECT_DIR}/llmo/dashboard
-
 build:
 	@rm -rf dist/*
 	source ${VENV_DIR}/bin/activate
-	$(PYTHON3_BIN) -m build
+	hatch build
 
 publish-test:
 	source ${VENV_DIR}/bin/activate
