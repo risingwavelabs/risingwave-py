@@ -142,11 +142,15 @@ class RisingWaveConnOptions:
         database: str,
         ssl: str = "disable",
     ):
-        return cls(f"risingwave://{user}:{password}@{host}:{port}/{database}?sslmode={ssl}")
+        return cls(
+            f"risingwave://{user}:{password}@{host}:{port}/{database}?sslmode={ssl}"
+        )
+
 
 class OutputFormat(Enum):
     RAW = 1
     DATAFRAME = 2
+
 
 class RisingWaveConnection:
     def __init__(self, conn, rw_version):
@@ -155,6 +159,19 @@ class RisingWaveConnection:
         self.rw_version: semver.Version = rw_version
 
     def execute(self, sql: str, *args):
+        """
+        Executes the given SQL query with optional arguments.
+
+        Args:
+            sql (str): The SQL query to execute.
+            *args: Optional arguments to be passed to the SQL query.
+
+        Raises:
+            Exception: If there is an error executing the SQL query.
+
+        Returns:
+            None
+        """
         try:
             cursor = self.conn.execute(text(sql), args)
             cursor.close()
@@ -163,7 +180,24 @@ class RisingWaveConnection:
             logging.error(f"[wavekit] failed to exeute sql: {sql}, exception: {e}")
             raise e
 
-    def fetch(self, sql: str, format = OutputFormat.RAW, *args):
+    def fetch(self, sql: str, format=OutputFormat.RAW, *args):
+        """
+        Executes the given SQL query and fetches the result.
+
+        Args:
+            sql (str): The SQL query to execute.
+            format (OutputFormat, optional): The format of the output result. Defaults to OutputFormat.RAW.
+            *args: Additional arguments to be passed to the SQL query.
+
+        Returns:
+            The fetched result. 
+            If `format` is set to `OutputFormat.DATAFRAME`, the result is returned as a pandas DataFrame.
+            Otherwise, the result is returned as a list of tuples.
+
+        Raises:
+            Exception: If an error occurs while executing the query.
+
+        """
         try:
             with self.conn.execute(text(sql), args) as cursor:
                 result = cursor.fetchall()
@@ -177,7 +211,25 @@ class RisingWaveConnection:
             )
             raise e
 
-    def fetchone(self, sql: str, format = OutputFormat.RAW, *args):
+    # Execute sql statement and fetch the first returned row
+    def fetchone(self, sql: str, format=OutputFormat.RAW, *args):
+        """
+        Executes the given SQL query and returns the first row of the result set.
+
+        Args:
+            sql (str): The SQL query to be executed.
+            format (OutputFormat, optional): The format of the returned result. Defaults to OutputFormat.RAW.
+            *args: Additional arguments to be passed to the SQL query.
+
+        Returns:
+            The first row of the result set or None if the result set is empty.  
+            If format is set to OutputFormat.DATAFRAME, it returns a pandas DataFrame with the result.
+            Otherwise, it returns a tuple.
+
+        Raises:
+            Exception: If an error occurs while executing the query.
+
+        """
         try:
             with self.conn.execute(text(sql), args) as cursor:
                 result = cursor.fetchone()
@@ -195,8 +247,33 @@ class RisingWaveConnection:
         data: pd.DataFrame,
         table_name: str,
         schema_name: str = "public",
-        force_flush=True,
+        force_flush=False,
     ):
+        """
+        Insert a DataFrame into a specified table in the database.
+
+        Parameters:
+        -----------
+        data : pd.DataFrame
+            The DataFrame containing the data to be inserted.
+        table_name : str
+            The name of the table where the data will be inserted.
+        schema_name : str, optional
+            The schema name where the table resides, default is "public".
+        force_flush : bool, optional
+            If True, forces a flush after the insert operation, default is False.
+
+        Raises:
+        -------
+        Exception
+            If there is an error during the insert operation.
+
+        Notes:
+        ------
+        - Currently, bulk insert for DataFrame is not supported.
+        - The `insert_row` buffer is cleared before inserting the DataFrame.
+        """
+
         # TODO: add support for bulk insert for DataFrame
         # For now, we need to make sure the `insert_row` buffer is cleared before inserting DataFrame
         fully_qual_table_name = f"{schema_name}.{table_name}"
@@ -212,9 +289,41 @@ class RisingWaveConnection:
             index=False,
         )
 
+        if force_flush:
+            self.execute("FLUSH")
+
     def insert_row(
-        self, table_name: str, schema_name: str = "public", force_flush=True, **cols
+        self, table_name: str, schema_name: str = "public", force_flush=False, **cols
     ):
+        """
+        Insert a single row into a specified table in the database.
+
+        Parameters:
+        -----------
+        table_name : str
+            The name of the table where the row will be inserted.
+        schema_name : str, optional
+            The schema name where the table resides, default is "public".
+        force_flush : bool, optional
+            If True, forces a flush after the insert operation, default is False.
+        **cols : dict
+            Column names and their corresponding values to be inserted.
+
+        Returns:
+        --------
+        Any
+            The result of the insert operation, which could be the result of the insert function or the bulk insert function.
+
+        Raises:
+        -------
+        Exception
+            If there is an error during the insert operation.
+
+        Notes:
+        ------
+        - If `force_flush` is True, the `insert_func` is used to insert the row.
+        - If `force_flush` is False, the `bulk_insert_func` is used to insert the row.
+        """
         fully_qual_table_name = f"{schema_name}.{table_name}"
         if table_name not in self._insert_ctx:
             self._insert_ctx[fully_qual_table_name] = InsertContext(
@@ -227,13 +336,24 @@ class RisingWaveConnection:
             return ctx.bulk_insert_func(**cols)
 
     def check_exist(self, name: str, schema_name: str = "public"):
+        """
+        Check if a table exists in the specified schema.
+
+        Args:
+            name (str): The name of the table/MV to check.
+            schema_name (str, optional): The name of the schema. Defaults to "public".
+
+        Returns:
+            bool: True if the table exists, False otherwise.
+        """
+        
         result = self.fetch(
             f"SELECT * FROM information_schema.tables WHERE table_name = '{name}' and table_schema = '{schema_name}'"
         )
         return result is not None and len(result) > 0
 
     def close(self):
-        pass
+        self.conn.close()
 
     def __enter__(self):
         return self
@@ -245,15 +365,16 @@ class RisingWaveConnection:
         self,
         subscribe_from: str,
         handler: SubscriptionHandler,
-        output_format: OutputFormat = OutputFormat.RAW,
+        max_batch_size: int = 10,
         schema_name: str = "public",
         sub_name: str = "",
+        output_format: OutputFormat = OutputFormat.RAW,
         retention_seconds=86400,
         persist_progress=False,
         error_if_not_exist=False,
     ):
         """
-        Crate a subscription subscribing the change of the materialized view.
+        Create a subscription subscribing the change of the materialized view.
         If the subscription already exists, it will skip the creation.
 
         Parameters
@@ -303,7 +424,7 @@ class RisingWaveConnection:
             retention_seconds=retention_seconds,
             persist_progress=persist_progress,
         )
-        sub._run(output_format)
+        sub._run(output_format, max_batch_size)
 
 
 class MaterializedView:
@@ -334,11 +455,8 @@ class MaterializedView:
             sql = f"CREATE MATERIALIZED VIEW {self.schema_name}.{self.name} AS {self.stmt}"
         return self.conn.execute(sql)
 
-    def _delete(self, ignore_not_exist: bool = True):
-        if ignore_not_exist:
-            sql = f"DROP MATERIALIZED VIEW IF EXISTS {self.schema_name}.{self.name}"
-        else:
-            sql = f"DROP MATERIALIZED VIEW {self.schema_name}.{self.name}"
+    def _delete(self):
+        sql = f"DROP MATERIALIZED VIEW {self.schema_name}.{self.name}"
         return self.conn.execute(sql)
 
     def on_change(
@@ -348,6 +466,7 @@ class MaterializedView:
         sub_name: str = "",
         retention_seconds=86400,
         persist_progress=False,
+        max_batch_size=10,
     ):
         self.conn.on_change(
             subscribe_from=self.name,
@@ -356,7 +475,8 @@ class MaterializedView:
             sub_name=sub_name,
             retention_seconds=retention_seconds,
             persist_progress=persist_progress,
-            output_format=output_format
+            output_format=output_format,
+            max_batch_size=max_batch_size,
         )
 
 
@@ -376,18 +496,26 @@ class Subscription:
         self.schema_name: str = schema_name
         self.handler: SubscriptionHandler = handler
         self.persist_progress: bool = persist_progress
-        self.conn.execute(
-            f"CREATE SUBSCRIPTION IF NOT EXISTS {self.schema_name}.{self.sub_name} FROM {self.schema_name}.{subscribe_from} WITH (retention = '{retention_seconds}s')"
+        _retry(
+            lambda: self.conn.execute(
+                f"CREATE SUBSCRIPTION IF NOT EXISTS {self.schema_name}.{self.sub_name} FROM {self.schema_name}.{subscribe_from} WITH (retention = '{retention_seconds}s')"
+            ),
+            1000,
+            5,
         )
-
         if self.persist_progress:
-            self.conn.execute(
-                "CREATE TABLE IF NOT EXISTS wavekit_sub_progress (sub_name STRING PRIMARY KEY, progress BIGINT) ON CONFLICT OVERWRITE"
+            _retry(
+                lambda: self.conn.execute(
+                    "CREATE TABLE IF NOT EXISTS wavekit_sub_progress (sub_name STRING PRIMARY KEY, progress BIGINT) ON CONFLICT DO UPDATE IF NOT NULL WITH VERSION COLUMN(progress)"
+                ),
+                1000,
+                5,
             )
 
     def _run(
         self,
         output_format: OutputFormat,
+        max_batch_size: int,
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
@@ -412,16 +540,18 @@ class Subscription:
             )
         while True:
             try:
-                data = self.conn.fetchone(f"FETCH NEXT FROM {cursor_name}", format=output_format)
+                data = self.conn.fetch(
+                    f"FETCH {max_batch_size} FROM {cursor_name}", format=output_format
+                )
                 if data is None or len(data) == 0:
                     time.sleep(wait_interval_ms / 1000)
                     continue
                 self.handler(data)
                 if self.persist_progress:
                     if output_format == OutputFormat.DATAFRAME:
-                        progress = data['rw_timestamp'].iloc[0]
+                        progress = data["rw_timestamp"].iloc[-1]
                     else:
-                        progress = data[-1]
+                        progress = data[-1][-1]
                     self.conn.execute(
                         f"INSERT INTO wavekit_sub_progress (sub_name, progress) VALUES ('{fully_qual_sub_name}', {progress})"
                     )

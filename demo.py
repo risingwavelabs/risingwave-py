@@ -35,19 +35,23 @@ class DemoHandler:
 
     # Callback when receiving changes from tick
     # Simply print the new tick data
-    def on_tick_changes(data):
-        print(f"Received new tick: {data}")
+    def on_tick_changes(data: list):
+        print(f"Received {len(data)} new ticks:")
+        for row in data:
+            print("\t" + f"{row}")
 
     # Callback when receiving changes from tick_analytics
     # Print the new average price if the avg price for a symbol in the last 10s is greater than 300
     def on_tick_analytics_changes(data: pd.DataFrame):
+        COLOR = '\033[92m'
+        ENDC = '\033[0m'
         for _, row in data.iterrows():
             # Print the new average price if the avg price for a symbol in the last 10s is greater than 300
             if (row["op"] == "UpdateInsert" or row["op"] == "Insert") and row[
                 "avg_price"
             ] >= 300:
                 print(
-                    f"{row['window_start']} - {row['window_end']}: {row['symbol']} avg price {row['avg_price']} exceeds 300"
+                    f"{COLOR}{row['window_start']} - {row['window_end']}: {row['symbol']} avg price {row['avg_price']} exceeds 300{ENDC}"
                 )
 
 
@@ -80,6 +84,7 @@ def demo_simple():
             output_format=OutputFormat.RAW,
             persist_progress=True,
             handler=DemoHandler.on_tick_changes,
+            max_batch_size=5,
         )
 
     # Create a materialized view for tick analytics and subscribe to the updates
@@ -90,12 +95,14 @@ def demo_simple():
         rw.mv(
             schema_name="wavekit_demo",
             name="tick_analytics",
-            stmt="""SELECT window_start, window_end, symbol, avg(close) as avg_price 
+            stmt="""SELECT window_start, window_end, symbol, ROUND(avg(close)) as avg_price 
                     FROM tumble(wavekit_demo.tick, timestamp, interval '10 seconds') 
                     GROUP BY window_start, window_end, symbol""",
         ).on_change(
             handler=DemoHandler.on_tick_analytics_changes,
+            persist_progress=True,
             output_format=OutputFormat.DATAFRAME,
+            max_batch_size=1,
         )
 
     run(subscribe_tick_analytics, subscribe_tick_stream, produce_tick)
