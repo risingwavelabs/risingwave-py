@@ -1,3 +1,3 @@
-from .core import RisingWave, Subscription, MaterializedView, OutputFormat
+from .core import RisingWave, Subscription, MaterializedView, OutputFormat, RisingWaveConnOptions
 
-__all__ = ["RisingWave", "Subscription", "MaterializedView", "OutputFormat"]
+__all__ = ["RisingWave", "Subscription", "MaterializedView", "OutputFormat", "RisingWaveConnOptions"]

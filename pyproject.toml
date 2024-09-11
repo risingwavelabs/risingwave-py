@@ -7,6 +7,8 @@ build-backend = "hatchling.build"
 exclude = [
   "/.git",
   "/venv",
+  "/.venv",
+  "/binance"
 ]
 
 
@@ -15,10 +17,11 @@ packages = ["wavekit"]
 
 
 [project]
-name = "wavekit_risingwavelabs"
+name = "wavekit"
 version = "0.0.1"
 authors = [
-    { name = "Mike Wang", email="mikecwangcn@gmail.com" }
+    { name = "Mike Wang", email="mikecwangcn@gmail.com" },
+    { name = "Patrick Huang", email="hzxa21@hotmail.com" }
 ]
 description = "Python SDK for real-time processing"
 readme = "README.md"
@@ -28,7 +31,12 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "pandas==2.2.2",
+    "sqlalchemy-risingwave==1.1.0",
+    "semver==3.0.2",
+    "psycopg2-binary==2.9.9",
 ]
+keywords = ["risingwave"]
 
 
 [projects.urls]

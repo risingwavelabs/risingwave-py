@@ -3,3 +3,4 @@ venv/**
 *.log
 # ignore pycache in all directories
 __pycache__/
+dist/**
