@@ -106,7 +106,7 @@ class InsertContext:
             for k in self.valid_cols:
                 if k not in data:
                     logging.warn(
-                        f"[wavekit] missing column {k} when inserting into table: {self.full_table_name}. Fill NULL for insertion."
+                        f"[risingwave] missing column {k} when inserting into table: {self.full_table_name}. Fill NULL for insertion."
                     )
                     item[k] = "NULL"
                 elif type(data[k]) == str or type(data[k]) == datetime:
@@ -175,9 +175,9 @@ class RisingWaveConnection:
         try:
             cursor = self.conn.execute(text(sql), args)
             cursor.close()
-            logging.info(f"[wavekit] successfully executed sql: {sql}")
+            logging.info(f"[risingwave] successfully executed sql: {sql}")
         except Exception as e:
-            logging.error(f"[wavekit] failed to exeute sql: {sql}, exception: {e}")
+            logging.error(f"[risingwave] failed to exeute sql: {sql}, exception: {e}")
             raise e
 
     def fetch(self, sql: str, format=OutputFormat.RAW, *args):
@@ -203,11 +203,11 @@ class RisingWaveConnection:
                 result = cursor.fetchall()
                 if format == OutputFormat.DATAFRAME:
                     result = pd.DataFrame(data=result, columns=cursor.keys())
-            logging.debug(f"[wavekit] successfully fetched result, query: {sql}")
+            logging.debug(f"[risingwave] successfully fetched result, query: {sql}")
             return result
         except Exception as e:
             logging.error(
-                f"[wavekit] failed to fetch result, query: {sql}, exception: {e}"
+                f"[risingwave] failed to fetch result, query: {sql}, exception: {e}"
             )
             raise e
 
@@ -238,7 +238,7 @@ class RisingWaveConnection:
             return result
         except Exception as e:
             logging.error(
-                f"[wavekit] failed to fetch the last row, query: {sql}, exception: {e}"
+                f"[risingwave] failed to fetch the last row, query: {sql}, exception: {e}"
             )
             raise e
 
@@ -506,7 +506,7 @@ class Subscription:
         if self.persist_progress:
             _retry(
                 lambda: self.conn.execute(
-                    "CREATE TABLE IF NOT EXISTS wavekit_sub_progress (sub_name STRING PRIMARY KEY, progress BIGINT) ON CONFLICT DO UPDATE IF NOT NULL WITH VERSION COLUMN(progress)"
+                    "CREATE TABLE IF NOT EXISTS risingwave_py_sub_progress (sub_name STRING PRIMARY KEY, progress BIGINT) ON CONFLICT DO UPDATE IF NOT NULL WITH VERSION COLUMN(progress)"
                 ),
                 1000,
                 5,
@@ -519,12 +519,12 @@ class Subscription:
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
-        cursor_name = f"{self.schema_name}.wavekit_cursor_{cursor_name}_{self.sub_name}"
+        cursor_name = f"{self.schema_name}.risingwave_py_cursor_{cursor_name}_{self.sub_name}"
         fully_qual_sub_name = f"{self.schema_name}.{self.sub_name}"
 
         if self.persist_progress:
             progress_row = self.conn.fetchone(
-                f"SELECT progress FROM wavekit_sub_progress WHERE sub_name = '{fully_qual_sub_name}'"
+                f"SELECT progress FROM risingwave_py_sub_progress WHERE sub_name = '{fully_qual_sub_name}'"
             )
             if progress_row is not None:
                 self.conn.execute(
@@ -553,7 +553,7 @@ class Subscription:
                     else:
                         progress = data[-1][-1]
                     self.conn.execute(
-                        f"INSERT INTO wavekit_sub_progress (sub_name, progress) VALUES ('{fully_qual_sub_name}', {progress})"
+                        f"INSERT INTO risingwave_py_sub_progress (sub_name, progress) VALUES ('{fully_qual_sub_name}', {progress})"
                     )
             except KeyboardInterrupt:
                 logging.info(f"subscription {fully_qual_sub_name} is interrupted")
@@ -596,9 +596,9 @@ class RisingWave(RisingWaveConnection):
             self.engine = self._create_engine()
             with self.getconn() as conn:
                 conn.execute(
-                    "CREATE TABLE IF NOT EXISTS _wavekit_version (version INT PRIMARY KEY)"
+                    "CREATE TABLE IF NOT EXISTS _risingwave_py_version (version INT PRIMARY KEY)"
                 )
-                conn.execute("INSERT INTO _wavekit_version (version) VALUES (1)")
+                conn.execute("INSERT INTO _risingwave_py_version (version) VALUES (1)")
                 version = conn.fetchone("SELECT version()")[0]
                 logging.info(f"connected to RisingWave. Version: {version}")
                 self.rw_version = extract_rw_version(version)

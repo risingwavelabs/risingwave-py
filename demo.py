@@ -56,30 +56,30 @@ class DemoHandler:
 
 
 def demo_simple():
-    from wavekit import RisingWave, OutputFormat
+    from risingwave import RisingWave, OutputFormat
     import time
 
     # Init logging
-    logging.basicConfig(filename="wavekit.log", level=logging.INFO)
+    logging.basicConfig(filename="risingwave_py.log", level=logging.INFO)
 
     # rw = RisingWave()
     rw = RisingWave()
 
     # Create a schema and a table for demo
-    rw.execute(sql="CREATE SCHEMA IF NOT EXISTS wavekit_demo")
+    rw.execute(sql="CREATE SCHEMA IF NOT EXISTS risingwave_py_demo")
 
     # Generate fake tick data and write to RisingWave
     def produce_tick():
         TICK_INTERVAL_MS = 1000
         while True:
             df = generate_tick_data()
-            rw.insert(schema_name="wavekit_demo", table_name="tick", data=df)
+            rw.insert(schema_name="risingwave_py_demo", table_name="tick", data=df)
             time.sleep(TICK_INTERVAL_MS / 1000)
 
     # Subscribe to the tick updates and print them to the console
     def subscribe_tick_stream():
         rw.on_change(
-            schema_name="wavekit_demo",
+            schema_name="risingwave_py_demo",
             subscribe_from="tick",
             output_format=OutputFormat.RAW,
             persist_progress=True,
@@ -89,14 +89,14 @@ def demo_simple():
 
     # Create a materialized view for tick analytics and subscribe to the updates
     def subscribe_tick_analytics():
-        while not rw.check_exist(schema_name="wavekit_demo", name="tick"):
+        while not rw.check_exist(schema_name="risingwave_py_demo", name="tick"):
             time.sleep(1)
             continue
         rw.mv(
-            schema_name="wavekit_demo",
+            schema_name="risingwave_py_demo",
             name="tick_analytics",
             stmt="""SELECT window_start, window_end, symbol, ROUND(avg(close)) as avg_price 
-                    FROM tumble(wavekit_demo.tick, timestamp, interval '10 seconds') 
+                    FROM tumble(risingwave_py_demo.tick, timestamp, interval '10 seconds') 
                     GROUP BY window_start, window_end, symbol""",
         ).on_change(
             handler=DemoHandler.on_tick_analytics_changes,
@@ -112,7 +112,7 @@ def demo_boll():
     import binance
 
     from datetime import datetime
-    from wavekit import RisingWave
+    from risingwave import RisingWave
 
     # if the connection info is not provided, it will try to start RisingWave in your local machine.
     rw = RisingWave()

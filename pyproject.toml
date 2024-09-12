@@ -4,24 +4,19 @@ build-backend = "hatchling.build"
 
 
 [tool.hatch.build.targets.sdist]
-exclude = [
-  "/.git",
-  "/venv",
-  "/.venv",
-  "/binance"
-]
+exclude = ["/.git", "/venv", "/.venv", "/binance"]
 
 
 [tool.hatch.build.targets.wheel]
-packages = ["wavekit"]
+packages = ["risingwave"]
 
 
 [project]
-name = "wavekit"
+name = "risingwave-py"
 version = "0.0.1"
 authors = [
-    { name = "Mike Wang", email="mikecwangcn@gmail.com" },
-    { name = "Patrick Huang", email="hzxa21@hotmail.com" }
+    { name = "Mike Wang", email = "mikecwangcn@gmail.com" },
+    { name = "Patrick Huang", email = "hzxa21@hotmail.com" },
 ]
 description = "Python SDK for real-time processing"
 readme = "README.md"
@@ -36,9 +31,15 @@ dependencies = [
     "semver==3.0.2",
     "psycopg2-binary==2.9.9",
 ]
-keywords = ["risingwave"]
+keywords = [
+    "risingwave",
+    "risingwave_py",
+    "risingwave-py",
+    "risingwave-python",
+    "risingwave_python",
+]
 
 
 [projects.urls]
-Homepage = "https://github.com/risingwavelabs/wavekit"
-Issues = "https://github.com/risingwavelabs/wavekit/issues"
+Homepage = "https://github.com/risingwavelabs/risingwave-py"
+Issues = "https://github.com/risingwavelabs/risingwave-py/issues"
