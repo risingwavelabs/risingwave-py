@@ -95,7 +95,7 @@ mv = rw.mv(
 rw.fetch("SELECT * FROM test_product_avg_price_mv", format=OutputFormat.DATAFRAME)
 ```
 
-#### Subscribe changes from your stremaing job
+#### Subscribe changes from your streaming job
 ```python
 # Subscribe to changes in avg price for each produce.
 # Print out the changes to console when they occur.
