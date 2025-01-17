@@ -7,16 +7,15 @@ def run(*fs):
         threading.Thread(target=f).start()
 
 
-def generate_tick_data():
+def generate_tick_data(min_row_per_tick: int = 1, max_row_per_tick: int = 5):
     from datetime import datetime
     import pandas as pd
     import random
     import pytz
 
-    MAX_NUM_ROWS_PER_TICK = 5
     SYMBOLS = ["ethusdt", "btcusdt", "adausdt", "dogeusdt", "xrpusdt"]
 
-    n = random.randint(1, MAX_NUM_ROWS_PER_TICK)
+    n = random.randint(min_row_per_tick, max_row_per_tick)
     return pd.DataFrame(
         {
             "symbol": [random.choice(SYMBOLS) for _ in range(n)],
@@ -43,8 +42,8 @@ class DemoHandler:
     # Callback when receiving changes from tick_analytics
     # Print the new average price if the avg price for a symbol in the last 10s is greater than 300
     def on_tick_analytics_changes(data: pd.DataFrame):
-        COLOR = '\033[92m'
-        ENDC = '\033[0m'
+        COLOR = "\033[92m"
+        ENDC = "\033[0m"
         for _, row in data.iterrows():
             # Print the new average price if the avg price for a symbol in the last 10s is greater than 300
             if (row["op"] == "UpdateInsert" or row["op"] == "Insert") and row[
@@ -55,7 +54,124 @@ class DemoHandler:
                 )
 
 
-def demo_simple():
+def demo_basic():
+    from risingwave import (
+        RisingWave,
+        OutputFormat,
+        RisingWaveConnOptions,
+        Tumble,
+        Round,
+        Interval,
+        Avg,
+        Sum,
+        Order,
+    )
+    import time
+
+    logging.basicConfig(filename="risingwave_py.log", level=logging.INFO)
+
+    # Connect to a RW instance on localhost
+    rw = RisingWave(
+        RisingWaveConnOptions.from_connection_info("localhost", 4566, "root", "", "dev")
+    )
+
+    demo = rw.table("demo")
+
+    # Write 20 rows to the demo table
+    df = generate_tick_data(20, 20)
+    demo.insert(df)
+    demo.flush()
+
+    ### Basic query on the table ###
+
+    print("> demo.show()")
+    print(demo.show())
+    print("")
+
+    print("> demo.count()")
+    print(demo.count())
+    print("")
+
+    print("> Simple select")
+    print(
+        demo.select(demo.symbol, demo.timestamp, demo.close)
+        .filter(demo.symbol == "ethusdt")
+        .orderby(demo.close, order=Order.desc)
+        .show()
+    )
+    print("")
+
+    print("> Aggregation")
+    print(
+        demo.groupby(demo.symbol)
+        .select(demo.symbol, Sum(demo.volume))
+        .orderby(Sum(demo.volume), order=Order.desc)
+        .show(2)
+    )
+    print("")
+
+    left_table = rw.table("demo_join_left")
+    right_table = rw.table("demo_join_right")
+    df = generate_tick_data(10, 10)
+    left_table.insert(df)
+    left_table.flush()
+    right_table.insert(df)
+    right_table.flush()
+    print("> Join")
+    print(
+        left_table.query()
+        .join(right_table)
+        .on(left_table.symbol == right_table.symbol)
+        .select()
+        .show()
+    )
+    print("")
+
+    ### Streaming query and event-driven subscription ###
+
+    # Tick data generator which runs in background to mimic continous event ingestion
+    def produce_tick():
+        TICK_INTERVAL_MS = 1000
+        while True:
+            df = generate_tick_data()
+            demo.insert(df)
+            demo.flush()
+            time.sleep(TICK_INTERVAL_MS / 1000)
+
+    # Subscribe to the tick updates and print them to the console
+    def subscribe_tick_stream():
+        demo.on_change(
+            output_format=OutputFormat.RAW,
+            persist_progress=True,
+            handler=DemoHandler.on_tick_changes,
+            max_batch_size=5,
+        )
+
+    # Create a streaming query for tick analytics and subscribe to the updates
+    def subscribe_tick_analytics():
+        streaming = (
+            rw.query()
+            .from_(Tumble(demo, demo.timestamp, Interval(seconds=10)))
+            .groupby("window_start", "window_end", demo.symbol)
+            .select(
+                "window_start",
+                "window_end",
+                demo.symbol,
+                Round(Avg(demo.close)).as_("avg_price"),
+            )
+            .streaming("tick_analytics")
+        )
+        streaming.on_change(
+            handler=DemoHandler.on_tick_analytics_changes,
+            persist_progress=True,
+            output_format=OutputFormat.DATAFRAME,
+            max_batch_size=1,
+        )
+
+    run(subscribe_tick_analytics, subscribe_tick_stream, produce_tick)
+
+
+def demo_raw_sql():
     from risingwave import RisingWave, OutputFormat
     import time
 
@@ -106,56 +222,6 @@ def demo_simple():
         )
 
     run(subscribe_tick_analytics, subscribe_tick_stream, produce_tick)
-
-
-def demo_boll():
-    import binance
-
-    from datetime import datetime
-    from risingwave import RisingWave
-
-    # if the connection info is not provided, it will try to start RisingWave in your local machine.
-    rw = RisingWave()
-
-    rw.execute(
-        sql="""
-            CREATE TABLE IF NOT EXISTS usdm_futures_klins_1m (
-                symbol     STRING,
-                timestamp  TIMESTAMPTZ,
-                open       FLOAT,
-                high       FLOAT,
-                low        FLOAT,
-                close      FLOAT,
-                volume     FLOAT
-            )"""
-    )
-
-    def handle_binance_klines_update(data):
-        k = data["data"]["k"]
-        rw.insert(
-            table_name="usdm_futures_klins_1m",
-            symbol=k["s"],
-            timestamp=datetime.fromtimestamp(k["t"] / 1000),
-            open=float(k["o"]),
-            high=float(k["h"]),
-            low=float(k["l"]),
-            close=float(k["c"]),
-            volume=float(k["v"]),
-        )
-
-    def subscribe_binance():
-        binance.subscribe_bars(
-            streams=["ethusdt@kline_1m", "ethusdt@kline_5m", "ethusdt@kline_15m"],
-            handler=handle_binance_klines_update,
-        )
-
-    def subscribe_mv():
-        rw.mv(
-            name="ethusdt_1m",
-            stmt="SELECT * FROM usdm_futures_klins_1m",
-        ).on_change(lambda data: print(data))
-
-    run(subscribe_binance, subscribe_mv)
 
 
 if __name__ == "__main__":

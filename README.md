@@ -27,7 +27,7 @@ You can also provision a free-tier cluster in [RisingWave Cloud](https://cloud.r
 ### 3. Interact with RisingWave in Python
 #### Initialization
 ```python
-from risingwave import RisingWave, RisingWaveConnOptions, OutputFormat
+from risingwave import *
 import pandas as pd
 import threading
 
@@ -40,19 +40,53 @@ rw = RisingWave(
 )
 ```
 
-#### Insert and query data in DataFrame via SQL
+#### Insert and query data in DataFrame
 ```python
 # Insert a dataframe into a test_product table
+test_product = rw.table("test_product")
 test_df1 = pd.DataFrame(
     {
         "product": ["foo", "bar"],
         "price": [123.4, 456.7],
     }
 )
-rw.insert(table_name="test_product", data=test_df1)
+test_product.insert(test_df1)
+test_product.flush()
 
-# Fetch data from the test_product table via SQL
-rw.fetch("SELECT * FROM test_product", format=OutputFormat.DATAFRAME)
+# Query test_product
+test_product.show()
+# OUTPUT:
+#   product  price
+# 0     foo  123.4
+# 1     bar  456.7
+
+test_product.count()
+# OUTPUT:
+#    count
+# 0      2
+
+(
+    test_product.groupby(test_product.product)
+    .select(test_product.product, Sum(test_product.price).as_("sum_price"))
+    .show()
+)
+# OUTPUT
+#   product  sum_price
+# 0     foo      123.4
+# 1     bar      456.7
+
+(
+    left_table.query()
+    .join(right_table)
+    .on(left_table.product == right_table.product)
+    .select()
+    .show()
+)
+# OUTPUT
+#   product  price product  price
+# 0     bar  456.7     bar  456.7
+# 1     foo  123.4     foo  123.4
+
 ```
 
 #### Subscribe changes from a table
@@ -60,8 +94,7 @@ rw.fetch("SELECT * FROM test_product", format=OutputFormat.DATAFRAME)
 # Subscribe to changes in the test_product table in a separate thread.
 # Print out the changes to console when they occur.
 def subscribe_product_change():
-    rw.on_change(
-        subscribe_from="test_product",
+    test_product.on_change(
         handler=lambda x: print(x),
         output_format=OutputFormat.DATAFRAME,
     )
@@ -77,7 +110,7 @@ test_df2 = pd.DataFrame(
         "price": [78.9, 10.11],
     }
 )
-rw.insert(table_name="test_product", data=test_df2)
+test_product.insert(test_df2).flush()
 
 
 ### You should be able to see the changes for produce in console now!
@@ -85,14 +118,17 @@ rw.insert(table_name="test_product", data=test_df2)
 
 #### Define your streaming job via materialized view in SQL
 ```python
-# Create a materialized view to calculate the average price of each product
-mv = rw.mv(
-    name="test_product_avg_price_mv",
-    stmt="SELECT product, avg(price) as avg_price from test_product GROUP BY product",
+# Create a streaming query to calculate the average price of each product
+test_product_avg_price = (
+    test_product.groupby(test_product.product)
+    .select(test_product.product, Avg(test_product.price).as_("avg_price"))
+    .having(Avg(test_product.price) > 0)
+    .streaming("test_product_avg_price")
 )
 
-# Fetch data from the materialized view via SQL
-rw.fetch("SELECT * FROM test_product_avg_price_mv", format=OutputFormat.DATAFRAME)
+# A materialized view is created with streaming query
+# and it is also queryable
+test_product_avg_price.show()
 ```
 
 #### Subscribe changes from your streaming job
@@ -100,7 +136,7 @@ rw.fetch("SELECT * FROM test_product_avg_price_mv", format=OutputFormat.DATAFRAM
 # Subscribe to changes in avg price for each produce.
 # Print out the changes to console when they occur.
 def subscribe_product_avg_price_change():
-    mv.on_change(
+    test_product_avg_price.on_change(
         handler=lambda x: print(x),
         output_format=OutputFormat.DATAFRAME,
     )
@@ -116,7 +152,7 @@ test_df3 = pd.DataFrame(
         "price": [200, 0.11],
     }
 )
-rw.insert(table_name="test_product", data=test_df3)
+test_product.insert(test_df3).flush()
 
 
 ### You should be able to see the changes in for product and product avg price console now!
@@ -127,5 +163,8 @@ You can also check the demo in our [repo](https://github.com/risingwavelabs/risi
 ```shell
 python3 -m venv
 source ./venv/bin/activate
-python3 demo.py simple
+python3 demo.py basic
+# You can also use execute sql using risingwave-py
+# Check demo_raw_sql for more details 
+# > python3 demo.py raw_sql
 ```
