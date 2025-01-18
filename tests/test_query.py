@@ -1,9 +1,11 @@
 import unittest
 import pandas as pd
-from pypika import Table
-from pypika.functions import Avg
+from pypika import Table, Order
+import pypika.functions as fn
+import pypika.analytics as an
 
-from risingwave.core import RisingWaveQuery, OutputFormat
+from risingwave.query import RisingWaveQuery, RowNumber
+from risingwave.core import OutputFormat
 
 
 class MockRisingWaveConnection:
@@ -62,7 +64,7 @@ class TestRisingWaveQuery(unittest.TestCase):
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_group_by_agg(self):
-        (self.query.group_by("department").agg(avg_salary=Avg("salary")).collect())
+        (self.query.group_by("department").agg(avg_salary=fn.Avg("salary")).collect())
         expected_query = 'SELECT *,AVG(\'salary\') "avg_salary" FROM "public"."employees" GROUP BY "department"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
@@ -93,7 +95,7 @@ class TestRisingWaveQuery(unittest.TestCase):
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_create_mv(self):
-        self.query.select("department").agg(avg_salary=Avg("salary")).group_by(
+        self.query.select("department").agg(avg_salary=fn.Avg("salary")).group_by(
             "department"
         ).create_mv("dept_avg_salary")
         expected_query = (
@@ -104,7 +106,7 @@ class TestRisingWaveQuery(unittest.TestCase):
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_create_mv_with_options(self):
-        self.query.select("department").agg(avg_salary=Avg("salary")).group_by(
+        self.query.select("department").agg(avg_salary=fn.Avg("salary")).group_by(
             "department"
         ).create_mv("dept_avg_salary", with_options={"append_only": True})
         expected_query = (
@@ -134,6 +136,28 @@ class TestRisingWaveQuery(unittest.TestCase):
          .collect())
         expected_query = ('SELECT "employees"."name","departments"."dept_name" FROM "public"."employees" '
                          'LEFT JOIN "public"."departments" ON "employees"."department_id"="departments"."id"')
+        self.assertEqual(self.mock_conn.last_query, expected_query)
+
+    def test_window_functions(self):
+        # Test window functions with PARTITION BY and ORDER BY
+        (self.query
+         .select(
+             'department', 
+             'salary',
+             RowNumber()
+                .over(self.query.table.department)
+                .orderby(self.query.table.salary, order=Order.desc)
+                .as_('row_num'),
+             an.Sum(self.query.table.salary)
+                .over(self.query.table.department)
+                .orderby(self.query.table.salary, order=Order.desc)
+                .as_('running_total')
+         )
+         .collect())
+        expected_query = ('SELECT "department","salary",'
+                         'ROW_NUMBER() OVER(PARTITION BY "department" ORDER BY "salary" DESC) "row_num",'
+                         'SUM("salary") OVER(PARTITION BY "department" ORDER BY "salary" DESC) "running_total" '
+                         'FROM "public"."employees"')
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
 
