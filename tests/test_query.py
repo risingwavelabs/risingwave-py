@@ -4,7 +4,7 @@ from pypika import Table, Order
 import pypika.functions as fn
 import pypika.analytics as an
 
-from risingwave.query import RisingWaveQuery, RowNumber
+from risingwave.query import RisingWaveQuery, RowNumber, RisingWaveTable
 from risingwave.core import OutputFormat
 
 
@@ -36,35 +36,36 @@ class TestRisingWaveQuery(unittest.TestCase):
     def setUp(self):
         self.mock_data = [("John", 30, 50000), ("Alice", 25, 60000), ("Bob", 35, 75000)]
         self.mock_conn = MockRisingWaveConnection(self.mock_data)
-        self.query = RisingWaveQuery(self.mock_conn, "employees")
+        self.table = RisingWaveTable(self.mock_conn, "employees")
+        self.query = self.table.query()
 
     def test_select_all(self):
-        self.query.select().collect()
+        self.query.select().run()
         expected_query = 'SELECT * FROM "public"."employees"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_select_columns(self):
-        self.query.select("name", "age").collect()
+        self.query.select("name", "age").run()
         expected_query = 'SELECT "name","age" FROM "public"."employees"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_filter(self):
-        (self.query.select("name").filter(Table("employees").age > 30).collect())
+        (self.query.select("name").filter(Table("employees").age > 30).run())
         expected_query = 'SELECT "employees"."name" FROM "public"."employees" WHERE "employees"."age">30'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_order_by(self):
-        (self.query.select("name").order_by("age", ascending=False).collect())
+        (self.query.select("name").order_by("age", ascending=False).run())
         expected_query = 'SELECT "name" FROM "public"."employees" ORDER BY "age" DESC'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_limit(self):
-        self.query.select().limit(5).collect()
+        self.query.select().limit(5).run()
         expected_query = 'SELECT * FROM "public"."employees" LIMIT 5'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_group_by_agg(self):
-        (self.query.group_by("department").agg(avg_salary=fn.Avg("salary")).collect())
+        (self.query.group_by("department").agg(avg_salary=fn.Avg("salary")).run())
         expected_query = 'SELECT *,AVG(\'salary\') "avg_salary" FROM "public"."employees" GROUP BY "department"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
@@ -76,9 +77,9 @@ class TestRisingWaveQuery(unittest.TestCase):
 
     def test_count(self):
         count = self.query.count()
-        expected_query = 'SELECT COUNT(*) FROM "public"."employees"'
+        expected_query = 'SELECT COUNT(*) "count" FROM "public"."employees"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
-        self.assertEqual(count, self.mock_data[0][0])  # First value of first tuple
+        self.assertTrue(isinstance(count, pd.DataFrame))
 
     def test_complex_query(self):
         (
@@ -86,7 +87,7 @@ class TestRisingWaveQuery(unittest.TestCase):
             .filter(Table("employees").age > 25)
             .order_by("salary", ascending=False)
             .limit(2)
-            .collect()
+            .run()
         )
         expected_query = (
             'SELECT "employees"."name","employees"."salary" FROM "public"."employees" '
@@ -117,23 +118,23 @@ class TestRisingWaveQuery(unittest.TestCase):
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_inner_join(self):
-        departments = RisingWaveQuery(self.mock_conn, "departments")
+        departments = RisingWaveTable(self.mock_conn, "departments")
         (self.query
          .select("employees.name", "departments.dept_name")
          .join(departments)
-         .on(self.query.table.department_id == departments.table.id)
-         .collect())
+         .on(self.query.table.department_id == departments.id)
+         .run())
         expected_query = ('SELECT "employees"."name","departments"."dept_name" FROM "public"."employees" '
                          'JOIN "public"."departments" ON "employees"."department_id"="departments"."id"')
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_left_join(self):
-        departments = RisingWaveQuery(self.mock_conn, "departments")
+        departments = RisingWaveTable(self.mock_conn, "departments")
         (self.query
          .select("employees.name", "departments.dept_name")
          .left_join(departments)
-         .on(self.query.table.department_id == departments.table.id)
-         .collect())
+         .on(self.query.table.department_id == departments.id)
+         .run())
         expected_query = ('SELECT "employees"."name","departments"."dept_name" FROM "public"."employees" '
                          'LEFT JOIN "public"."departments" ON "employees"."department_id"="departments"."id"')
         self.assertEqual(self.mock_conn.last_query, expected_query)
@@ -153,7 +154,7 @@ class TestRisingWaveQuery(unittest.TestCase):
                 .orderby(self.query.table.salary, order=Order.desc)
                 .as_('running_total')
          )
-         .collect())
+         .run())
         expected_query = ('SELECT "department","salary",'
                          'ROW_NUMBER() OVER(PARTITION BY "department" ORDER BY "salary" DESC) "row_num",'
                          'SUM("salary") OVER(PARTITION BY "department" ORDER BY "salary" DESC) "running_total" '

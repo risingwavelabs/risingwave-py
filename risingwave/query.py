@@ -1,19 +1,50 @@
+from typing import TYPE_CHECKING, List, Optional, Union
 from pypika import Query, Table, Field, Order, functions as fn
 from pypika.terms import AnalyticFunction
+import pandas as pd
 
+if TYPE_CHECKING:
+    from .core import RisingWaveConnection
 from .types import OutputFormat
+
+class RisingWaveTable(Table):
+    """Represents a table in RisingWave"""
+    
+    def __init__(self, connection: "RisingWaveConnection", name: str, schema: str = "public"):
+        super().__init__(name, schema=schema)
+        self.conn = connection
+        self.name = name
+        self.schema = schema
+        self._df_list: List[pd.DataFrame] = []
+
+    def query(self) -> "RisingWaveQuery":
+        """Create a query builder for this table"""
+        return RisingWaveQuery(self)
+        
+    def insert(self, df: pd.DataFrame) -> "RisingWaveQuery":
+        return self.query().insert(df)
 
 
 class RisingWaveQuery:
     """A query builder for RisingWave SQL queries"""
 
-    def __init__(
-        self, connection: "RisingWaveConnection", name: str, schema: str = "public"
-    ):
-        self.conn = connection
-        self.table = Table(name, schema=schema)
-        self._query = Query.from_(self.table)
+    def __init__(self, table: RisingWaveTable):
+        self.table = table
+        self._query = Query.from_(table)
         self._selected = False
+        self._pending_df = None
+
+    def insert(self, df: pd.DataFrame):
+        """
+        Insert data into the table.
+
+        Args:
+            df (pd.DataFrame): Data to insert
+        """
+        if self._selected:
+            raise ValueError("Cannot insert data after querying")
+        self._pending_df = pd.concat([self._pending_df, df])
+        return self
 
     def select(self, *columns):
         """
@@ -31,7 +62,6 @@ class RisingWaveQuery:
             fields = []
             for col in columns:
                 if isinstance(col, str) and "." in col:
-                    # Handle table-qualified columns like "table.column"
                     table_name, col_name = col.split(".")
                     fields.append(Table(table_name)[col_name])
                 else:
@@ -122,19 +152,16 @@ class RisingWaveQuery:
         for alias, expr in aggregations.items():
             selections.append(expr.as_(alias))
         self._query = self._query.select(*selections)
+        self._selected = True
         return self
 
-    def collect(self, output_format: "OutputFormat" = "OutputFormat.RAW"):
-        """
-        Execute the query and collect results.
-
-        Args:
-            output_format (OutputFormat): Desired output format
-
-        Returns:
-            Query results in specified format
-        """
-        return self.conn.fetch(str(self._query), format=output_format)
+    def run(self, output_format: OutputFormat = OutputFormat.DATAFRAME):
+        """Execute the query and return results"""
+        if self._pending_df:
+            self.table.conn.insert(data=self._pending_df)
+            self._pending_df = None
+        if self._selected:
+            return self.table.conn.fetch(str(self._query), format=output_format)
 
     def show(self, n=20):
         """
@@ -147,7 +174,7 @@ class RisingWaveQuery:
             First n rows of the result
         """
         self.limit(n)
-        return self.collect(OutputFormat.DATAFRAME)
+        return self.run(OutputFormat.DATAFRAME)
 
     def count(self) -> int:
         """
@@ -156,9 +183,8 @@ class RisingWaveQuery:
         Returns:
             int: Number of rows
         """
-        count_query = Query.from_(self.table).select(fn.Count("*"))
-        result = self.conn.fetchone(str(count_query))
-        return result[0] if result else 0
+        self.agg(count=fn.Count("*"))
+        return self.run(OutputFormat.DATAFRAME)
 
     def create_mv(self, name, with_options=None):
         """
@@ -187,10 +213,10 @@ class RisingWaveQuery:
 
         query += f" AS {str(self._query)}"
 
-        self.conn.fetch(query)
+        self.table.conn.fetch(query)
         return query
 
-    def join(self, other: "RisingWaveQuery"):
+    def join(self, other: Union["RisingWaveQuery", RisingWaveTable]):
         """
         Add an INNER JOIN to the query.
 
@@ -202,10 +228,13 @@ class RisingWaveQuery:
         """
         if not self._selected:
             self.select()
-        self._query = self._query.join(other.table)
+        if isinstance(other, RisingWaveQuery):
+            self._query = self._query.join(other._query)
+        else:
+            self._query = self._query.join(other)
         return self
 
-    def left_join(self, other: "RisingWaveQuery"):
+    def left_join(self, other: Union["RisingWaveQuery", RisingWaveTable]):
         """
         Add a LEFT JOIN to the query.
 
@@ -217,7 +246,10 @@ class RisingWaveQuery:
         """
         if not self._selected:
             self.select()
-        self._query = self._query.left_join(other.table)
+        if isinstance(other, RisingWaveQuery):
+            self._query = self._query.left_join(other._query)
+        else:
+            self._query = self._query.left_join(other)
         return self
 
     def on(self, condition):

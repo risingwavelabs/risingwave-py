@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, Engine, text, Connection
 import pandas as pd
 
 from .types import OutputFormat, RisingWaveConnOptions
-from .query import RisingWaveQuery
+from .query import RisingWaveQuery, RisingWaveTable
 
 SubscriptionHandler = Callable[[Any], Awaitable[None]]
 
@@ -127,9 +127,13 @@ class InsertContext:
 
 class RisingWaveConnection:
     def __init__(self, conn, rw_version):
-        self.conn: Connection = conn
+        self.conn = conn
+        self.rw_version = rw_version
         self._insert_ctx: dict[str, InsertContext] = dict()
-        self.rw_version: semver.Version = rw_version
+
+    def table(self, name: str, schema: str = "public") -> "RisingWaveTable":
+        """Get a table reference"""
+        return RisingWaveTable(self, name, schema)
 
     def query(self, name: str, schema: str = "public") -> "RisingWaveQuery":
         """
