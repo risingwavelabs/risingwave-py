@@ -1,7 +1,10 @@
 from typing import TYPE_CHECKING, List, Optional, Union
-from pypika import Query, Table, Field, Order, functions as fn
+from pypika import Query, Table, Field, Order, PostgreSQLQuery, functions as fn
 from pypika.terms import AnalyticFunction
 import pandas as pd
+from pypika.dialects import PostgreSQLQueryBuilder
+from pypika.functions import *
+from pypika.analytics import *
 
 if TYPE_CHECKING:
     from .core import RisingWaveConnection
@@ -25,12 +28,33 @@ class RisingWaveTable(Table):
         return self.query().insert(df)
 
 
+class RisingWaveQueryBuilder(PostgreSQLQueryBuilder):
+    def __init__(self):
+        super().__init__()
+        self._selected = False
+        self._pending_df = None
+    
+    def select(self, *columns):
+        if not columns:
+            self = self.select("*")
+        else:
+            fields = []
+            for col in columns:
+                if isinstance(col, str) and "." in col:
+                    table_name, col_name = col.split(".")
+                    fields.append(Table(table_name)[col_name])
+                else:
+                    fields.append(self.table[col] if isinstance(col, str) else col)
+            self = self.select(*fields)
+        self._selected = True
+        return self
+
 class RisingWaveQuery:
     """A query builder for RisingWave SQL queries"""
 
     def __init__(self, table: RisingWaveTable):
         self.table = table
-        self._query = Query.from_(table)
+        self._query = PostgreSQLQuery.from_(table)
         self._selected = False
         self._pending_df = None
 
