@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, Engine, text, Connection
 import pandas as pd
 
 from .types import OutputFormat, RisingWaveConnOptions
-from .query import RisingWaveQuery, RisingWaveTable
+from .query import RisingWaveQueryBuilder, RisingWaveTable
 
 SubscriptionHandler = Callable[[Any], Awaitable[None]]
 
@@ -131,22 +131,22 @@ class RisingWaveConnection:
         self.rw_version = rw_version
         self._insert_ctx: dict[str, InsertContext] = dict()
 
-    def table(self, name: str, schema: str = "public") -> "RisingWaveTable":
+    def table(self, name: str, schema: str = "public", alias=None) -> "RisingWaveTable":
         """Get a table reference"""
         return RisingWaveTable(self, name, schema)
 
-    def query(self, name: str, schema: str = "public") -> "RisingWaveQuery":
+    def query(self, name: str, schema: str = "public") -> "RisingWaveQueryBuilder":
         """
         Create a query builder for a table.
-        
+
         Args:
             name (str): Name of the table
             schema (str): Schema name, defaults to "public"
-            
+
         Returns:
-            RisingWaveQuery: A query builder interface
+            RisingWaveQueryBuilder: A query builder interface
         """
-        return RisingWaveQuery(self, name, schema)
+        return RisingWaveQueryBuilder(self)
 
     def execute(self, sql: str, *args):
         """
@@ -180,7 +180,7 @@ class RisingWaveConnection:
             *args: Additional arguments to be passed to the SQL query.
 
         Returns:
-            The fetched result. 
+            The fetched result.
             If `format` is set to `OutputFormat.DATAFRAME`, the result is returned as a pandas DataFrame.
             Otherwise, the result is returned as a list of tuples.
 
@@ -212,7 +212,7 @@ class RisingWaveConnection:
             *args: Additional arguments to be passed to the SQL query.
 
         Returns:
-            The first row of the result set or None if the result set is empty.  
+            The first row of the result set or None if the result set is empty.
             If format is set to OutputFormat.DATAFRAME, it returns a pandas DataFrame with the result.
             Otherwise, it returns a tuple.
 
@@ -336,7 +336,7 @@ class RisingWaveConnection:
         Returns:
             bool: True if the table exists, False otherwise.
         """
-        
+
         result = self.fetch(
             f"SELECT * FROM information_schema.tables WHERE table_name = '{name}' and table_schema = '{schema_name}'"
         )
@@ -509,7 +509,9 @@ class Subscription:
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
-        cursor_name = f"{self.schema_name}.risingwave_py_cursor_{cursor_name}_{self.sub_name}"
+        cursor_name = (
+            f"{self.schema_name}.risingwave_py_cursor_{cursor_name}_{self.sub_name}"
+        )
         fully_qual_sub_name = f"{self.schema_name}.{self.sub_name}"
 
         if self.persist_progress:

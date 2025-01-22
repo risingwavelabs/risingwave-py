@@ -28,75 +28,90 @@ class MockRisingWaveConnection:
         if format == OutputFormat.DATAFRAME:
             return pd.DataFrame([self.mock_data[0]])
         return self.mock_data[0]
-
+    
+    def execute(self, query: str, *args):
+        """Mock execute method that stores the query"""
+        self.last_query = query
 
 class TestRisingWaveQuery(unittest.TestCase):
     def setUp(self):
         self.mock_data = [("John", 30, 50000), ("Alice", 25, 60000), ("Bob", 35, 75000)]
         self.mock_conn = MockRisingWaveConnection(self.mock_data)
-        self.table = RisingWaveTable(self.mock_conn, "employees")
-        self.query = self.table.query()
+        self.employees_table = RisingWaveTable(self.mock_conn, "employees")
+        self.departments_table = RisingWaveTable(self.mock_conn, "departments")
 
     def test_select_all(self):
-        self.query.select().run()
+        self.employees_table.select().run()
         expected_query = 'SELECT * FROM "public"."employees"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_select_columns(self):
-        self.query.select("name", "age").run()
+        self.employees_table.select("name", "age").run()
         expected_query = 'SELECT "name","age" FROM "public"."employees"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
-    def test_filter(self):
-        (self.query.select("name").filter(Table("employees").age > 30).run())
+    def test_where(self):
+        (self.employees_table.select("name").where(Table("employees").age > 30).run())
         expected_query = 'SELECT "employees"."name" FROM "public"."employees" WHERE "employees"."age">30'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_order_by(self):
-        (self.query.select("name").order_by("age", ascending=False).run())
+        (self.employees_table.select("name").orderby("age", order=Order.desc).run())
         expected_query = 'SELECT "name" FROM "public"."employees" ORDER BY "age" DESC'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_limit(self):
-        self.query.select().limit(5).run()
+        self.employees_table.select().limit(5).run()
         expected_query = 'SELECT * FROM "public"."employees" LIMIT 5'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_group_by_agg(self):
-        (self.query.group_by("department").agg(avg_salary=Avg("salary")).run())
-        expected_query = 'SELECT *,AVG(\'salary\') "avg_salary" FROM "public"."employees" GROUP BY "department"'
+        (
+            self.employees_table.groupby("department")
+            .agg(Avg("salary").as_("avg_salary"))
+            .run()
+        )
+        expected_query = 'SELECT AVG(\'salary\') "avg_salary" FROM "public"."employees" GROUP BY "department"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
-    def test_show(self):
-        df = self.query.show(2)
+    def test_limit(self):
+        df = self.employees_table.select().limit(2).run()
         expected_query = 'SELECT * FROM "public"."employees" LIMIT 2'
         self.assertEqual(self.mock_conn.last_query, expected_query)
         self.assertTrue(isinstance(df, pd.DataFrame))
 
     def test_count(self):
-        count = self.query.count()
-        expected_query = 'SELECT COUNT(*) "count" FROM "public"."employees"'
+        count = self.employees_table.count().show()
+        expected_query = 'SELECT COUNT(\'*\') FROM "public"."employees"'
         self.assertEqual(self.mock_conn.last_query, expected_query)
         self.assertTrue(isinstance(count, pd.DataFrame))
-
+    
+    def test_show(self):
+        df = self.employees_table.show(2)
+        expected_query = 'SELECT * FROM "public"."employees" LIMIT 2'
+        self.assertEqual(self.mock_conn.last_query, expected_query)
+        self.assertTrue(isinstance(df, pd.DataFrame))
+    
     def test_complex_query(self):
         (
-            self.query.select("name", "salary")
-            .filter(Table("employees").age > 25)
-            .order_by("salary", ascending=False)
+            self.employees_table.select(
+                self.employees_table.name, self.employees_table.salary
+            )
+            .where(self.employees_table.age > 25)
+            .orderby(self.employees_table.salary, order=Order.desc)
             .limit(2)
             .run()
         )
         expected_query = (
-            'SELECT "employees"."name","employees"."salary" FROM "public"."employees" '
-            'WHERE "employees"."age">25 ORDER BY "employees"."salary" DESC LIMIT 2'
+            'SELECT "name","salary" FROM "public"."employees" '
+            'WHERE "age">25 ORDER BY "salary" DESC LIMIT 2'
         )
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_create_mv(self):
-        self.query.select("department").agg(avg_salary=Avg("salary")).group_by(
+        self.employees_table.select("department", Avg("salary").as_('avg_salary')).groupby(
             "department"
-        ).create_mv("dept_avg_salary")
+        ).streaming("dept_avg_salary")
         expected_query = (
             'CREATE MATERIALIZED VIEW "dept_avg_salary" AS '
             'SELECT "department",AVG(\'salary\') "avg_salary" '
@@ -105,9 +120,9 @@ class TestRisingWaveQuery(unittest.TestCase):
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_create_mv_with_options(self):
-        self.query.select("department").agg(avg_salary=Avg("salary")).group_by(
+        self.employees_table.select("department", Avg("salary").as_('avg_salary')).groupby(
             "department"
-        ).create_mv("dept_avg_salary", with_options={"append_only": True})
+        ).streaming("dept_avg_salary", with_options={"append_only": True})
         expected_query = (
             'CREATE MATERIALIZED VIEW "dept_avg_salary" WITH (append_only=true) AS '
             'SELECT "department",AVG(\'salary\') "avg_salary" '
@@ -116,47 +131,57 @@ class TestRisingWaveQuery(unittest.TestCase):
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_inner_join(self):
-        departments = RisingWaveTable(self.mock_conn, "departments")
-        (self.query
-         .select("employees.name", "departments.dept_name")
-         .join(departments)
-         .on(self.query.table.department_id == departments.id)
-         .run())
-        expected_query = ('SELECT "employees"."name","departments"."dept_name" FROM "public"."employees" '
-                         'JOIN "public"."departments" ON "employees"."department_id"="departments"."id"')
+        (
+            self.employees_table.select(
+                self.employees_table.name, self.departments_table.dept_name
+            )
+            .join(self.departments_table)
+            .on(self.employees_table.department_id == self.departments_table.id)
+            .run()
+        )
+        expected_query = (
+            'SELECT "employees"."name","departments"."dept_name" FROM "public"."employees" '
+            'JOIN "public"."departments" ON "employees"."department_id"="departments"."id"'
+        )
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_left_join(self):
-        departments = RisingWaveTable(self.mock_conn, "departments")
-        (self.query
-         .select("employees.name", "departments.dept_name")
-         .left_join(departments)
-         .on(self.query.table.department_id == departments.id)
-         .run())
-        expected_query = ('SELECT "employees"."name","departments"."dept_name" FROM "public"."employees" '
-                         'LEFT JOIN "public"."departments" ON "employees"."department_id"="departments"."id"')
+        (
+            self.employees_table.select(
+                self.employees_table.name, self.departments_table.dept_name
+            )
+            .left_join(self.departments_table)
+            .on(self.employees_table.department_id == self.departments_table.id)
+            .run()
+        )
+        expected_query = (
+            'SELECT "employees"."name","departments"."dept_name" FROM "public"."employees" '
+            'LEFT JOIN "public"."departments" ON "employees"."department_id"="departments"."id"'
+        )
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
     def test_window_functions(self):
         # Test window functions with PARTITION BY and ORDER BY
-        (self.query
-         .select(
-             'department', 
-             'salary',
-             RowNumber()
-                .over(self.query.table.department)
-                .orderby(self.query.table.salary, order=Order.desc)
-                .as_('row_num'),
-             Sum(self.query.table.salary)
-                .over(self.query.table.department)
-                .orderby(self.query.table.salary, order=Order.desc)
-                .as_('running_total')
-         )
-         .run())
-        expected_query = ('SELECT "department","salary",'
-                         'ROW_NUMBER() OVER(PARTITION BY "department" ORDER BY "salary" DESC) "row_num",'
-                         'SUM("salary") OVER(PARTITION BY "department" ORDER BY "salary" DESC) "running_total" '
-                         'FROM "public"."employees"')
+        (
+            self.employees_table.select(
+                "department",
+                "salary",
+                RowNumber()
+                .over(self.employees_table.department)
+                .orderby(self.employees_table.salary, order=Order.desc)
+                .as_("row_num"),
+                Sum(self.employees_table.salary)
+                .over(self.employees_table.department)
+                .orderby(self.employees_table.salary, order=Order.desc)
+                .as_("running_total"),
+            ).run()
+        )
+        expected_query = (
+            'SELECT "department","salary",'
+            'ROW_NUMBER() OVER(PARTITION BY "department" ORDER BY "salary" DESC) "row_num",'
+            'SUM("salary") OVER(PARTITION BY "department" ORDER BY "salary" DESC) "running_total" '
+            'FROM "public"."employees"'
+        )
         self.assertEqual(self.mock_conn.last_query, expected_query)
 
 
