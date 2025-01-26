@@ -15,6 +15,9 @@ from typing import Callable, Awaitable, Any
 from sqlalchemy import create_engine, Engine, text, Connection
 import pandas as pd
 
+from .types import OutputFormat, RisingWaveConnOptions
+from .query import RisingWaveQueryBuilder, RisingWaveTable
+
 SubscriptionHandler = Callable[[Any], Awaitable[None]]
 
 DEFAULT_CURSOR_IDLE_INTERVAL_MS = 100
@@ -122,41 +125,11 @@ class InsertContext:
         self.data_buf = []
 
 
-class RisingWaveConnOptions:
-    def __init__(self, conn_str: str):
-        if conn_str.startswith("postgresql://"):
-            conn_str = conn_str.replace("postgresql://", "risingwave://")
-        elif not conn_str.startswith("risingwave://"):
-            raise ValueError(
-                "connection string must start with 'risingwave://' or 'postgresql://'"
-            )
-        self.dsn = conn_str
-
-    @classmethod
-    def from_connection_info(
-        cls,
-        host: str,
-        port: int,
-        user: str,
-        password: str,
-        database: str,
-        ssl: str = "disable",
-    ):
-        return cls(
-            f"risingwave://{user}:{password}@{host}:{port}/{database}?sslmode={ssl}"
-        )
-
-
-class OutputFormat(Enum):
-    RAW = 1
-    DATAFRAME = 2
-
-
 class RisingWaveConnection:
     def __init__(self, conn, rw_version):
-        self.conn: Connection = conn
+        self.conn = conn
+        self.rw_version = rw_version
         self._insert_ctx: dict[str, InsertContext] = dict()
-        self.rw_version: semver.Version = rw_version
 
     def execute(self, sql: str, *args):
         """
@@ -190,7 +163,7 @@ class RisingWaveConnection:
             *args: Additional arguments to be passed to the SQL query.
 
         Returns:
-            The fetched result. 
+            The fetched result.
             If `format` is set to `OutputFormat.DATAFRAME`, the result is returned as a pandas DataFrame.
             Otherwise, the result is returned as a list of tuples.
 
@@ -222,7 +195,7 @@ class RisingWaveConnection:
             *args: Additional arguments to be passed to the SQL query.
 
         Returns:
-            The first row of the result set or None if the result set is empty.  
+            The first row of the result set or None if the result set is empty.
             If format is set to OutputFormat.DATAFRAME, it returns a pandas DataFrame with the result.
             Otherwise, it returns a tuple.
 
@@ -346,7 +319,7 @@ class RisingWaveConnection:
         Returns:
             bool: True if the table exists, False otherwise.
         """
-        
+
         result = self.fetch(
             f"SELECT * FROM information_schema.tables WHERE table_name = '{name}' and table_schema = '{schema_name}'"
         )
@@ -519,7 +492,9 @@ class Subscription:
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
-        cursor_name = f"{self.schema_name}.risingwave_py_cursor_{cursor_name}_{self.sub_name}"
+        cursor_name = (
+            f"{self.schema_name}.risingwave_py_cursor_{cursor_name}_{self.sub_name}"
+        )
         fully_qual_sub_name = f"{self.schema_name}.{self.sub_name}"
 
         if self.persist_progress:
@@ -618,6 +593,24 @@ class RisingWave(RisingWaveConnection):
         self.conn.close()
         if self.local_risingwave is not None:
             self.local_risingwave.kill()
+    
+    def table(self, name: str, schema: str = "public", alias=None) -> "RisingWaveTable":
+        """Get a table reference"""
+        return RisingWaveTable(self, name, schema)
+
+    def query(self) -> "RisingWaveQueryBuilder":
+        """
+        Create a query builder for a table.
+
+        Args:
+            name (str): Name of the table
+            schema (str): Schema name, defaults to "public"
+
+        Returns:
+            RisingWaveQueryBuilder: A query builder interface
+        """
+        return RisingWaveQueryBuilder(self)
+
 
     def mv(
         self,

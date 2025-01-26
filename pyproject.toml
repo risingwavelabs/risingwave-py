@@ -13,7 +13,7 @@ packages = ["risingwave"]
 
 [project]
 name = "risingwave-py"
-version = "0.0.1"
+version = "0.0.3"
 authors = [
     { name = "Mike Wang", email = "mikecwangcn@gmail.com" },
     { name = "Patrick Huang", email = "hzxa21@hotmail.com" },

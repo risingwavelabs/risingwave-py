@@ -10,3 +10,6 @@ pandas==2.2.2
 sqlalchemy-risingwave==1.1.0
 semver==3.0.2
 psycopg2-binary==2.9.9
+pytest==7.0.0
+pytest-mock==3.10.0
+pypika==0.48.9
