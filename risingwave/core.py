@@ -6,6 +6,7 @@ import subprocess
 import traceback
 import re
 import semver
+from urllib.parse import urlencode, quote
 
 from enum import Enum
 from shutil import which
@@ -141,9 +142,42 @@ class RisingWaveConnOptions:
         password: str,
         database: str,
         ssl: str = "disable",
-    ):
+        **extra_params,
+    ) -> "RisingWaveConnOptions":
+        """Creates a RisingWaveConnOptions instance from connection parameters.
+
+        Args:
+            host: Database server hostname
+            port: Database server port number
+            user: Username for authentication
+            password: Password for authentication
+            database: Name of the database to connect to
+            ssl: SSL mode for connection. Valid values are "disable", "allow", 
+                "prefer", "require", "verify-ca", "verify-full"
+            **extra_params: Additional connection parameters to be included in the URL
+
+        Returns:
+            RisingWaveConnOptions: A connection options instance configured with the 
+                provided parameters
+
+        Examples:
+            >>> conn = RisingWaveConnOptions.from_connection_info(
+            ...     host="localhost",
+            ...     port=4566,
+            ...     user="admin",
+            ...     password="password",
+            ...     database="dev",
+            ...     ssl="verify-full",
+            ...     tenant="tenant"
+            ... )
+            >>> print(conn.dsn)
+            'risingwave://admin:password@localhost:4566/dev?sslmode=verify-full&tenant=tenant'
+        """
+        params = {"sslmode": ssl}
+        params.update(extra_params)
+        query_params = urlencode(params, quote_via=quote)
         return cls(
-            f"risingwave://{user}:{password}@{host}:{port}/{database}?sslmode={ssl}"
+            f"risingwave://{user}:{password}@{host}:{port}/{database}?{query_params}"
         )
 
 
