@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  UV_LOCKED: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -22,7 +25,7 @@ jobs:
 
       - name: Sync environment
         run: |
-          uv sync --locked
+          uv sync
 
       - name: Build package
         run: |
