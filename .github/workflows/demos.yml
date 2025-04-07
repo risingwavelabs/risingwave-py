@@ -22,7 +22,11 @@ jobs:
 
       # TODO: use docker image with diffrent versions of RisingWave
       - name: Install RisingWave
-        run: cd /tmp && curl -L https://risingwave.com/sh | sh
+        run: |
+          mkdir -p /opt/risingwave
+          cd /opt/risingwave
+          curl -L https://risingwave.com/sh | sh
+          echo "/opt/risingwave" >> $GITHUB_PATH
 
       - name: Run demo (smoke test)
         run: |
