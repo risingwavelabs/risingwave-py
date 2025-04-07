@@ -352,8 +352,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "pandas", specifier = ">=2.2.2" },
-    { name = "semver", specifier = ">=3.0.2" },
-    { name = "sqlalchemy-risingwave", specifier = ">=1.1.0,<1.2.0" },
+    { name = "semver", specifier = ">=3.0.0" },
+    { name = "sqlalchemy-risingwave", specifier = "==1.1.1" },
 ]
 
 [package.metadata.requires-dev]

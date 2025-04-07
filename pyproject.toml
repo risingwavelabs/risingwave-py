@@ -28,7 +28,13 @@ classifiers = [
 ]
 dependencies = [
     "pandas>=2.2.2",
-    "sqlalchemy-risingwave>=1.1.0,<1.2.0",
+    # FIXME: Currently, we are building against sqlalchemy 2.0, which is also sqlalchemy-risingwave 1.1.1
+    # depends on. However, there's still some compatibility issues unresolved.
+    # We should either:
+    # 1. Rewrite this library to use sqlalchemy-risingwave 1.4.0, which depends on sqlalchemy 1.4.
+    # 2. Wait for sqlalchemy-risingwave 2.0.0 to be released, which will depend on sqlalchemy 2.0 and
+    #    resolve the compatibility issues. (https://github.com/risingwavelabs/sqlalchemy-risingwave/issues/22)
+    "sqlalchemy-risingwave==1.1.1",
     "semver>=3.0.2",
 ]
 keywords = [
