@@ -20,9 +20,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Sync environment
+        run: |
+          # Sync the environment to ensure all dependencies are up to date
+          uv sync --locked
+
       - name: Build package
         run: |
-          uv build --locked
+          uv build
 
       - name: Verify build artifacts
         run: |
