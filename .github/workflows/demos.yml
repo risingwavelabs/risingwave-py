@@ -20,8 +20,6 @@ jobs:
 
       - name: Prepare uv and Python
         uses: astral-sh/setup-uv@v5
-        with:
-          python-version: ${{ matrix.python-version }}
 
       # TODO: use docker image with diffrent versions of RisingWave
       - name: Install RisingWave
