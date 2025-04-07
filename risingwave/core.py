@@ -554,7 +554,7 @@ class Subscription:
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
-        cursor_name = f"{self.schema_name}.risingwave_py_cursor_{cursor_name}_{self.sub_name}"
+        cursor_name = f"risingwave_py_cursor_{cursor_name}_{self.schema_name}_{self.sub_name}"
         fully_qual_sub_name = f"{self.schema_name}.{self.sub_name}"
 
         if self.persist_progress:
