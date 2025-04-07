@@ -1,12 +1,31 @@
 import logging
 import threading
+import time
 
 import pandas as pd
 
 
 def run(*fs):
+    exceptions = []
+    threads = []
+
+    def catch(f):
+        try:
+            f()
+        except Exception as e:
+            logging.error(f"Exception occurred: {e}")
+            exceptions.append(e)
+
     for f in fs:
-        threading.Thread(target=f).start()
+        thread = threading.Thread(target=lambda: catch(f))
+        thread.daemon = True  # don't wait for this thread to finish
+        thread.start()
+        threads.append(thread)
+
+    while any(thread.is_alive() for thread in threads):
+        if exceptions:
+            raise exceptions[0]
+        time.sleep(1)
 
 
 def generate_tick_data():
