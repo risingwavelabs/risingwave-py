@@ -123,9 +123,7 @@ rw.insert(table_name="test_product", data=test_df3)
 ```
 
 ## Demo
-You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py). 
+You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).
 ```shell
-python3 -m venv
-source ./venv/bin/activate
-python3 demo.py simple
+uv run demo.py simple
 ```
