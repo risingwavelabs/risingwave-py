@@ -22,7 +22,6 @@ jobs:
 
       - name: Sync environment
         run: |
-          # Sync the environment to ensure all dependencies are up to date
           uv sync --locked
 
       - name: Build package

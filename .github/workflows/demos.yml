@@ -22,7 +22,7 @@ jobs:
 
       # TODO: use docker image with diffrent versions of RisingWave
       - name: Install RisingWave
-        run: curl -L https://risingwave.com/sh | sh
+        run: cd /tmp && curl -L https://risingwave.com/sh | sh
 
       - name: Run demo (smoke test)
         run: |
