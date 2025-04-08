@@ -13,7 +13,8 @@ from shutil import which
 from datetime import datetime
 from typing import Callable, Awaitable, Any
 
-from sqlalchemy import create_engine, Engine, text, Connection
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Connection, Engine
 import pandas as pd
 
 SubscriptionHandler = Callable[[Any], Awaitable[None]]
@@ -30,7 +31,7 @@ def _retry(f, interval_ms: int, times: int):
             return f()
         except Exception as e:
             ee = e
-            logging.warn(f"retrying function, exception: {e}, {traceback.format_exc()}")
+            logging.warning(f"retrying function, exception: {e}, {traceback.format_exc()}")
             cnt += 1
             time.sleep(interval_ms / 1000)
     raise RuntimeError(

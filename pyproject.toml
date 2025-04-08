@@ -2,7 +2,6 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-
 [tool.hatch.build.targets.sdist]
 exclude = ["/.git", "/venv", "/.venv", "/binance"]
 
@@ -20,16 +19,23 @@ authors = [
 ]
 description = "Python SDK for real-time processing"
 readme = "README.md"
-requires-python = ">=3.8"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "pandas==2.2.2",
-    "sqlalchemy-risingwave==1.1.0",
-    "semver==3.0.2",
-    "psycopg2-binary==2.9.9",
+    "pandas>=2.2.2",
+    # FIXME: Currently, we are building against sqlalchemy 2.0, which is also sqlalchemy-risingwave 1.1.1
+    # depends on. However, there's still some compatibility issues unresolved.
+    # We should either:
+    # 1. Rewrite this library to use sqlalchemy-risingwave 1.4.0, which depends on sqlalchemy 1.4.
+    # 2. Wait for sqlalchemy-risingwave 2.0.0 to be released, which will depend on sqlalchemy 2.0 and
+    #    resolve the compatibility issues. (https://github.com/risingwavelabs/sqlalchemy-risingwave/issues/22)
+    "sqlalchemy-risingwave==1.1.1",
+    "semver>=3.0.2",
 ]
 keywords = [
     "risingwave",
@@ -40,6 +46,19 @@ keywords = [
 ]
 
 
-[projects.urls]
+[project.urls]
 Homepage = "https://github.com/risingwavelabs/risingwave-py"
 Issues = "https://github.com/risingwavelabs/risingwave-py/issues"
+
+[dependency-groups]
+dev = [
+    "psycopg2-binary>=2.9.9",
+    "websocket-client>=1.8.0",
+]
+
+
+[[tool.uv.index]]
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
+publish-url = "https://test.pypi.org/legacy/"
+explicit = true

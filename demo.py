@@ -162,8 +162,8 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python demo.py <demo_name>")
-        print("  e.g. python demo.py simple\n")
+        print(f"Usage: {sys.argv[0]} <demo_name>")
+        print(f"  e.g. {sys.argv[0]} simple\n")
         print(
             "Available demos:"
             + "\n  simple: a simple demo that subscribes to synthetic cryto trading data and output to consle."
