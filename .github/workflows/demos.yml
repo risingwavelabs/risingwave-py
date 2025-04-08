@@ -1,0 +1,44 @@
+name: Run Demos
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  UV_LOCKED: true
+
+jobs:
+  test-demos:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        demo: ["simple", "boll"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare uv and Python
+        uses: astral-sh/setup-uv@v5
+
+      # TODO: use docker image with diffrent versions of RisingWave
+      - name: Install RisingWave
+        run: |
+          mkdir -p /opt/risingwave
+          cd /opt/risingwave
+          curl -L https://risingwave.com/sh | sh
+          echo "/opt/risingwave" >> $GITHUB_PATH
+
+      - name: Run demo (smoke test)
+        run: |
+          # Run the demo with a timeout to prevent it from running indefinitely
+          timeout 30s uv run examples/demo.py ${{ matrix.demo }} || code=$?
+          if [ $code -eq 124 ]; then
+            # If the command timed out (code 124), that's expected since the demo runs continuously
+            echo "Demo ran successfully for 30 seconds"
+            exit 0
+          else
+            # Any other exit code indicates a failure
+            echo "Demo exited with code $code"
+            exit $code
+          fi

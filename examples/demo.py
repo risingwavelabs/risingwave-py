@@ -83,7 +83,6 @@ def demo_simple():
     # Init logging
     logging.basicConfig(filename="risingwave_py.log", level=logging.INFO)
 
-    # rw = RisingWave()
     rw = RisingWave()
 
     # Create a schema and a table for demo
