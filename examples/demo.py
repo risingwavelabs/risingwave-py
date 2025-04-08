@@ -130,7 +130,7 @@ def demo_simple():
 
 
 def demo_boll():
-    import binance
+    from examples.binance import subscribe_bars
 
     from datetime import datetime
     from risingwave import RisingWave
@@ -171,7 +171,7 @@ def demo_boll():
         )
 
     def subscribe_binance():
-        binance.subscribe_bars(
+        subscribe_bars(
             streams=["ethusdt@kline_1m", "ethusdt@kline_5m", "ethusdt@kline_15m"],
             handler=handle_binance_klines_update,
         )

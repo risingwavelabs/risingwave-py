@@ -2,6 +2,7 @@
 
 Simple Python SDK for event-driven applications with RisingWave.
 
+
 ## Quick start
 
 ### 1. Install risingwave-py ([PyPI](https://pypi.org/project/risingwave-py/))
@@ -124,6 +125,11 @@ rw.insert(table_name="test_product", data=test_df3)
 
 ## Demo
 You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).
+
 ```shell
-uv run demo.py simple
+# Run the simple demo
+uv run examples/demo.py simple
+
+# Run the Binance demo
+uv run examples/demo.py boll
 ```
