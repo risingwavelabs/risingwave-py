@@ -1,10 +1,31 @@
 import logging
 import threading
+import time
+
+import pandas as pd
 
 
 def run(*fs):
+    exceptions = []
+    threads = []
+
+    def catch(f):
+        try:
+            f()
+        except Exception as e:
+            logging.error(f"Exception occurred: {e}")
+            exceptions.append(e)
+
     for f in fs:
-        threading.Thread(target=f).start()
+        thread = threading.Thread(target=lambda: catch(f))
+        thread.daemon = True  # don't wait for this thread to finish
+        thread.start()
+        threads.append(thread)
+
+    while any(thread.is_alive() for thread in threads):
+        if exceptions:
+            raise exceptions[0]
+        time.sleep(1)
 
 
 def generate_tick_data():
@@ -43,8 +64,8 @@ class DemoHandler:
     # Callback when receiving changes from tick_analytics
     # Print the new average price if the avg price for a symbol in the last 10s is greater than 300
     def on_tick_analytics_changes(data: pd.DataFrame):
-        COLOR = '\033[92m'
-        ENDC = '\033[0m'
+        COLOR = "\033[92m"
+        ENDC = "\033[0m"
         for _, row in data.iterrows():
             # Print the new average price if the avg price for a symbol in the last 10s is greater than 300
             if (row["op"] == "UpdateInsert" or row["op"] == "Insert") and row[
@@ -132,15 +153,21 @@ def demo_boll():
 
     def handle_binance_klines_update(data):
         k = data["data"]["k"]
+        df = pd.DataFrame(
+            {
+                "symbol": k["s"],
+                "timestamp": datetime.fromtimestamp(k["t"] / 1000),
+                "open": float(k["o"]),
+                "high": float(k["h"]),
+                "low": float(k["l"]),
+                "close": float(k["c"]),
+                "volume": float(k["v"]),
+            },
+            index=[0],
+        )
         rw.insert(
             table_name="usdm_futures_klins_1m",
-            symbol=k["s"],
-            timestamp=datetime.fromtimestamp(k["t"] / 1000),
-            open=float(k["o"]),
-            high=float(k["h"]),
-            low=float(k["l"]),
-            close=float(k["c"]),
-            volume=float(k["v"]),
+            data=df,
         )
 
     def subscribe_binance():
