@@ -12,7 +12,7 @@ packages = ["risingwave"]
 
 [project]
 name = "risingwave-py"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
     { name = "Mike Wang", email = "mikecwangcn@gmail.com" },
     { name = "Patrick Huang", email = "hzxa21@hotmail.com" },
@@ -51,10 +51,7 @@ Homepage = "https://github.com/risingwavelabs/risingwave-py"
 Issues = "https://github.com/risingwavelabs/risingwave-py/issues"
 
 [dependency-groups]
-dev = [
-    "psycopg2-binary>=2.9.9",
-    "websocket-client>=1.8.0",
-]
+dev = ["psycopg2-binary>=2.9.9", "websocket-client>=1.8.0"]
 
 
 [[tool.uv.index]]

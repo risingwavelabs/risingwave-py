@@ -7,7 +7,7 @@ Simple Python SDK for event-driven applications with RisingWave.
 
 ### 1. Install risingwave-py ([PyPI](https://pypi.org/project/risingwave-py/))
 ```bash
-pip install risingwave-py
+pip install risingwave-py psycopg2-binary # or psycopg2
 ```
 
 ### 2. Run RisingWave
