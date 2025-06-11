@@ -11,10 +11,10 @@ pip install risingwave-py psycopg2-binary # or psycopg2
 ```
 
 ### 2. Run RisingWave
-You can install RisingWave standlone on your laptop via:
+You can install RisingWave standalone on your laptop via:
 ```bash
 # Download and install RisingWave standalone
-curl https://risingwave.com/sh | sh
+curl -L https://risingwave.com/sh | sh
 
 # start RisingWave on macOS
 risingwave
