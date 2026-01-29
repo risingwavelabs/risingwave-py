@@ -362,7 +362,7 @@ class RisingWaveConnection:
         - If `force_flush` is False, the `bulk_insert_func` is used to insert the row.
         """
         fully_qual_table_name = f"{schema_name}.{table_name}"
-        if table_name not in self._insert_ctx:
+        if fully_qual_table_name not in self._insert_ctx:
             self._insert_ctx[fully_qual_table_name] = InsertContext(
                 self, table_name, schema_name
             )
@@ -638,10 +638,6 @@ class RisingWave(RisingWaveConnection):
             # wait for the meta service is up
             self.engine = self._create_engine()
             with self.getconn() as conn:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS _risingwave_py_version (version INT PRIMARY KEY)"
-                )
-                conn.execute("INSERT INTO _risingwave_py_version (version) VALUES (1)")
                 version = conn.fetchone("SELECT version()")[0]
                 logging.info(f"connected to RisingWave. Version: {version}")
                 self.rw_version = extract_rw_version(version)
