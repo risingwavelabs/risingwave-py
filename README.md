@@ -57,6 +57,9 @@ rw.fetch("SELECT * FROM test_product", format=OutputFormat.DATAFRAME)
 ```
 
 #### Subscribe changes from a table
+
+Subscriptions require RisingWave 2.3.0 or later.
+
 ```python
 # Subscribe to changes in the test_product table in a separate thread.
 # Print out the changes to console when they occur.
