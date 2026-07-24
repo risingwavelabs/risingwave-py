@@ -27,6 +27,12 @@ jobs:
         run: |
           uv sync
 
+      - name: Run checks
+        run: |
+          uv run ruff format --check risingwave tests
+          uv run ruff check risingwave tests
+          uv run python -m unittest discover -v
+
       - name: Build package
         run: |
           uv build

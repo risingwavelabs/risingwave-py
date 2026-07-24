@@ -3,64 +3,74 @@ import time
 import logging
 import atexit
 import subprocess
-import traceback
 import re
+import threading
 import semver
-from urllib.parse import urlencode, quote
 
 from enum import Enum
 from shutil import which
-from datetime import datetime
-from typing import Callable, Awaitable, Any
+from typing import Callable, Any
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy import create_engine, insert, table, column, text
+from sqlalchemy.engine import Connection, Engine, URL
+from sqlalchemy.sql import Executable
 import pandas as pd
 
-SubscriptionHandler = Callable[[Any], Awaitable[None]]
+SubscriptionHandler = Callable[[Any], None]
 
 DEFAULT_CURSOR_IDLE_INTERVAL_MS = 100
 DEFAULT_RW_VERSION = "1.7.0"
+MINIMAL_SUBSCRIPTION_RW_VERSION = semver.Version.parse("2.3.0")
+SCHEMA_TABLE_COLUMNS_SQL = """
+SELECT column_name
+FROM information_schema.columns
+WHERE table_name = :table_name AND table_schema = :schema_name
+ORDER BY ordinal_position
+"""
+VALID_SSL_MODES = {
+    "disable",
+    "allow",
+    "prefer",
+    "require",
+    "verify-ca",
+    "verify-full",
+}
 
 
 def _retry(f, interval_ms: int, times: int):
-    cnt = 0
-    ee = None
-    while cnt < times:
+    if interval_ms < 0:
+        raise ValueError("interval_ms must not be negative")
+    if times <= 0:
+        raise ValueError("times must be positive")
+
+    last_error = None
+    for attempt in range(times):
         try:
             return f()
         except Exception as e:
-            ee = e
-            logging.warning(
-                f"retrying function, exception: {e}, {traceback.format_exc()}"
-            )
-            cnt += 1
-            time.sleep(interval_ms / 1000)
-    raise RuntimeError(
-        f"failed to retry function, last exception is {ee}, set logging level to DEBUG for more details"
-    )
+            last_error = e
+            if attempt + 1 < times:
+                logging.warning(
+                    "retrying function after exception (%s/%s): %s",
+                    attempt + 1,
+                    times,
+                    e,
+                )
+                logging.debug("retry failure details", exc_info=True)
+                time.sleep(interval_ms / 1000)
+    raise RuntimeError("failed to retry function") from last_error
 
 
 def extract_rw_version(sql_version_output: str) -> semver.Version:
-    # Define the regular expression pattern to extract only the version string x.x.x
     pattern = r"RisingWave-(\d+\.\d+\.\d+)"
-
-    # Compile the regular expression
-    regex = re.compile(pattern)
-
-    # Search for the pattern in the input string
-    match = regex.search(sql_version_output)
-
-    # Return the matched version if found, else return default version
-    version = semver.Version.parse(DEFAULT_RW_VERSION)
-    try:
-        version = semver.Version.parse(match.group(1))
-    except Exception as e:
-        logging.error(
-            f"failed to extract RisingWave version from {sql_version_output}, exception: {e}"
+    match = re.search(pattern, sql_version_output)
+    if match is None:
+        logging.warning(
+            "failed to extract RisingWave version; using compatibility baseline %s",
+            DEFAULT_RW_VERSION,
         )
-
-    return version
+        return semver.Version.parse(DEFAULT_RW_VERSION)
+    return semver.Version.parse(match.group(1))
 
 
 class InsertContext:
@@ -71,8 +81,13 @@ class InsertContext:
         schema_name: str,
         buf_size: int = 5,
     ):
+        if buf_size <= 0:
+            raise ValueError("buf_size must be positive")
+
         result = risingwave_conn.fetch(
-            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}' and table_schema = '{schema_name}'"
+            SCHEMA_TABLE_COLUMNS_SQL,
+            OutputFormat.RAW,
+            {"table_name": table_name, "schema_name": schema_name},
         )
         if result is None or len(result) == 0:
             raise RuntimeError(
@@ -81,55 +96,71 @@ class InsertContext:
 
         self.risingwave_conn: "RisingWaveConnection" = risingwave_conn
         cols = [row[0] for row in result]
-        self.stmt: str = (
-            f"INSERT INTO {schema_name}.{table_name} ({str.join(',', cols)}) VALUES "
+        self._table = table(
+            table_name,
+            *(column(column_name) for column_name in cols),
+            schema=schema_name,
         )
-        self.row_template: str = f"({str.join(',', [f'{{{col}}}' for col in cols])})"
-        self.data_buf: list = []
-        self.valid_cols: list = cols
+        self.data_buf: list[dict[str, Any]] = []
+        self.valid_cols: tuple[str, ...] = tuple(cols)
         self.buf_size: int = buf_size
         self.schema_name = schema_name
         self.table_name = table_name
+        self.full_table_name = f"{schema_name}.{table_name}"
+        self._lock = threading.RLock()
 
         def bulk_insert(**kwargs):
-            self.data_buf.append(kwargs)
-            if len(self.data_buf) >= self.buf_size:
-                self.flush()
+            with self._lock:
+                self.data_buf.append(kwargs)
+                if len(self.data_buf) >= self.buf_size:
+                    self.flush()
 
         def insert(**kwargs):
-            self.data_buf.append(kwargs)
-            self.flush()
+            with self._lock:
+                self.data_buf.append(kwargs)
+                self.flush()
 
         self.bulk_insert_func: Callable = bulk_insert
         self.insert_func: Callable = insert
 
     def flush(self):
-        valid_data = []
-        for data in self.data_buf:
-            item = dict()
-            for k in self.valid_cols:
-                if k not in data:
-                    logging.warn(
-                        f"[risingwave] missing column {k} when inserting into table: {self.full_table_name}. Fill NULL for insertion."
+        with self._lock:
+            if not self.data_buf:
+                return
+
+            valid_columns = set(self.valid_cols)
+            grouped_rows: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+            for data in self.data_buf:
+                unknown_columns = set(data) - valid_columns
+                if unknown_columns:
+                    columns = ", ".join(sorted(unknown_columns))
+                    raise ValueError(
+                        f"unknown columns for {self.full_table_name}: {columns}"
                     )
-                    item[k] = "NULL"
-                elif type(data[k]) == str or type(data[k]) == datetime:
-                    item[k] = f"'{data[k]}'"
+
+                present_columns = tuple(
+                    name for name in self.valid_cols if name in data
+                )
+                grouped_rows.setdefault(present_columns, []).append(
+                    {name: data[name] for name in present_columns}
+                )
+
+            statement = insert(self._table)
+            for present_columns, rows in grouped_rows.items():
+                if present_columns:
+                    self.risingwave_conn._execute_statement(statement, rows)
                 else:
-                    item[k] = data[k]
-            valid_data.append(item)
-        stmt = self.stmt + str.join(
-            ",", [self.row_template.format(**data) for data in valid_data]
-        )
-        self.risingwave_conn.execute(stmt)
-        self.risingwave_conn.execute("FLUSH")
-        self.data_buf = []
+                    for _ in rows:
+                        self.risingwave_conn._execute_statement(statement.values())
+
+            self.risingwave_conn.execute("FLUSH")
+            self.data_buf.clear()
 
 
 class RisingWaveConnOptions:
     def __init__(self, conn_str: str):
         if conn_str.startswith("postgresql://"):
-            conn_str = conn_str.replace("postgresql://", "risingwave://")
+            conn_str = "risingwave://" + conn_str[len("postgresql://") :]
         elif not conn_str.startswith("risingwave://"):
             raise ValueError(
                 "connection string must start with 'risingwave://' or 'postgresql://'"
@@ -176,12 +207,22 @@ class RisingWaveConnOptions:
             >>> print(conn.dsn)
             'risingwave://admin:password@localhost:4566/dev?sslmode=verify-full&tenant=tenant'
         """
-        params = {"sslmode": ssl}
-        params.update(extra_params)
-        query_params = urlencode(params, quote_via=quote)
-        return cls(
-            f"risingwave://{user}:{password}@{host}:{port}/{database}?{query_params}"
+        if ssl not in VALID_SSL_MODES:
+            valid_values = ", ".join(sorted(VALID_SSL_MODES))
+            raise ValueError(f"ssl must be one of: {valid_values}")
+
+        query = {"sslmode": ssl}
+        query.update({key: str(value) for key, value in extra_params.items()})
+        url = URL.create(
+            drivername="risingwave",
+            username=user,
+            password=password,
+            host=host,
+            port=port,
+            database=database,
+            query=query,
         )
+        return cls(url.render_as_string(hide_password=False))
 
 
 class OutputFormat(Enum):
@@ -190,10 +231,47 @@ class OutputFormat(Enum):
 
 
 class RisingWaveConnection:
-    def __init__(self, conn, rw_version):
+    def __init__(self, conn, rw_version, connection_factory=None):
         self.conn: Connection = conn
         self._insert_ctx: dict[str, InsertContext] = dict()
         self.rw_version: semver.Version = rw_version
+        self._connection_factory = connection_factory
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _normalize_execute_args(args):
+        if not args:
+            return None
+        if len(args) == 1:
+            return args[0]
+        return args
+
+    def _execute_statement(self, statement: Executable, params=None):
+        with self._lock:
+            try:
+                if params is None:
+                    cursor = self.conn.execute(statement)
+                else:
+                    cursor = self.conn.execute(statement, params)
+                cursor.close()
+                logging.debug("[risingwave] successfully executed statement")
+            except Exception as error:
+                logging.error(
+                    "[risingwave] failed to execute statement (%s)",
+                    type(error).__name__,
+                )
+                raise
+
+    def _quote_identifier(self, identifier: str) -> str:
+        if not isinstance(identifier, str) or not identifier:
+            raise ValueError("SQL identifiers must be non-empty strings")
+        return self.conn.dialect.identifier_preparer.quote(identifier)
+
+    def _qualified_name(self, schema_name: str, object_name: str) -> str:
+        return (
+            f"{self._quote_identifier(schema_name)}."
+            f"{self._quote_identifier(object_name)}"
+        )
 
     def execute(self, sql: str, *args):
         """
@@ -209,13 +287,8 @@ class RisingWaveConnection:
         Returns:
             None
         """
-        try:
-            cursor = self.conn.execute(text(sql), args)
-            cursor.close()
-            logging.info(f"[risingwave] successfully executed sql: {sql}")
-        except Exception as e:
-            logging.error(f"[risingwave] failed to exeute sql: {sql}, exception: {e}")
-            raise e
+        params = self._normalize_execute_args(args)
+        self._execute_statement(text(sql), params)
 
     def fetch(self, sql: str, format=OutputFormat.RAW, *args):
         """
@@ -235,18 +308,25 @@ class RisingWaveConnection:
             Exception: If an error occurs while executing the query.
 
         """
-        try:
-            with self.conn.execute(text(sql), args) as cursor:
-                result = cursor.fetchall()
-                if format == OutputFormat.DATAFRAME:
-                    result = pd.DataFrame(data=result, columns=cursor.keys())
-            logging.debug(f"[risingwave] successfully fetched result, query: {sql}")
-            return result
-        except Exception as e:
-            logging.error(
-                f"[risingwave] failed to fetch result, query: {sql}, exception: {e}"
-            )
-            raise e
+        params = self._normalize_execute_args(args)
+        with self._lock:
+            try:
+                if params is None:
+                    cursor = self.conn.execute(text(sql))
+                else:
+                    cursor = self.conn.execute(text(sql), params)
+                with cursor:
+                    result = cursor.fetchall()
+                    if format == OutputFormat.DATAFRAME:
+                        result = pd.DataFrame(data=result, columns=cursor.keys())
+                logging.debug("[risingwave] successfully fetched result")
+                return result
+            except Exception as error:
+                logging.error(
+                    "[risingwave] failed to fetch result (%s)",
+                    type(error).__name__,
+                )
+                raise
 
     # Execute sql statement and fetch the first returned row
     def fetchone(self, sql: str, format=OutputFormat.RAW, *args):
@@ -267,17 +347,24 @@ class RisingWaveConnection:
             Exception: If an error occurs while executing the query.
 
         """
-        try:
-            with self.conn.execute(text(sql), args) as cursor:
-                result = cursor.fetchone()
-                if format == OutputFormat.DATAFRAME and result is not None:
-                    result = pd.DataFrame(data=[result], columns=cursor.keys())
-            return result
-        except Exception as e:
-            logging.error(
-                f"[risingwave] failed to fetch the last row, query: {sql}, exception: {e}"
-            )
-            raise e
+        params = self._normalize_execute_args(args)
+        with self._lock:
+            try:
+                if params is None:
+                    cursor = self.conn.execute(text(sql))
+                else:
+                    cursor = self.conn.execute(text(sql), params)
+                with cursor:
+                    result = cursor.fetchone()
+                    if format == OutputFormat.DATAFRAME and result is not None:
+                        result = pd.DataFrame(data=[result], columns=cursor.keys())
+                return result
+            except Exception as error:
+                logging.error(
+                    "[risingwave] failed to fetch one result (%s)",
+                    type(error).__name__,
+                )
+                raise
 
     def insert(
         self,
@@ -314,17 +401,18 @@ class RisingWaveConnection:
         # TODO: add support for bulk insert for DataFrame
         # For now, we need to make sure the `insert_row` buffer is cleared before inserting DataFrame
         fully_qual_table_name = f"{schema_name}.{table_name}"
-        if table_name in self._insert_ctx:
-            self._insert_ctx[fully_qual_table_name].flush()
+        with self._lock:
+            if fully_qual_table_name in self._insert_ctx:
+                self._insert_ctx[fully_qual_table_name].flush()
 
-        data.to_sql(
-            name=table_name,
-            schema=schema_name,
-            con=self.conn,
-            if_exists="append",
-            method="multi",
-            index=False,
-        )
+            data.to_sql(
+                name=table_name,
+                schema=schema_name,
+                con=self.conn,
+                if_exists="append",
+                method="multi",
+                index=False,
+            )
 
         if force_flush:
             self.execute("FLUSH")
@@ -362,14 +450,14 @@ class RisingWaveConnection:
         - If `force_flush` is False, the `bulk_insert_func` is used to insert the row.
         """
         fully_qual_table_name = f"{schema_name}.{table_name}"
-        if fully_qual_table_name not in self._insert_ctx:
-            self._insert_ctx[fully_qual_table_name] = InsertContext(
-                self, table_name, schema_name
-            )
-        ctx = self._insert_ctx[fully_qual_table_name]
-        if force_flush:
-            return ctx.insert_func(**cols)
-        else:
+        with self._lock:
+            if fully_qual_table_name not in self._insert_ctx:
+                self._insert_ctx[fully_qual_table_name] = InsertContext(
+                    self, table_name, schema_name
+                )
+            ctx = self._insert_ctx[fully_qual_table_name]
+            if force_flush:
+                return ctx.insert_func(**cols)
             return ctx.bulk_insert_func(**cols)
 
     def check_exist(self, name: str, schema_name: str = "public"):
@@ -384,13 +472,25 @@ class RisingWaveConnection:
             bool: True if the table exists, False otherwise.
         """
 
-        result = self.fetch(
-            f"SELECT * FROM information_schema.tables WHERE table_name = '{name}' and table_schema = '{schema_name}'"
+        result = self.fetchone(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_name = :table_name AND table_schema = :schema_name
+            LIMIT 1
+            """,
+            OutputFormat.RAW,
+            {"table_name": name, "schema_name": schema_name},
         )
-        return result is not None and len(result) > 0
+        return result is not None
 
     def close(self):
-        self.conn.close()
+        with self._lock:
+            try:
+                for insert_context in self._insert_ctx.values():
+                    insert_context.flush()
+            finally:
+                self.conn.close()
 
     def __enter__(self):
         return self
@@ -432,10 +532,10 @@ class RisingWaveConnection:
         -------
         None
         """
-        MINIMAL_SUBSCRIPTION_RW_VERSION = semver.Version.parse("2.0.0")
         if self.rw_version < MINIMAL_SUBSCRIPTION_RW_VERSION:
             raise RuntimeError(
-                "on_change is not supported in RisingWave version < 2.0.0. Please upgrade RisingWave."
+                "on_change requires RisingWave 2.3.0 or later. "
+                "Please upgrade RisingWave."
             )
 
         def check_exist():
@@ -452,15 +552,27 @@ class RisingWaveConnection:
         if sub_name == "":
             sub_name = f"{subscribe_from}_sub"
 
-        sub = Subscription(
-            conn=self,
-            handler=handler,
-            schema_name=schema_name,
-            sub_name=sub_name,
-            subscribe_from=subscribe_from,
-            retention_seconds=retention_seconds,
-            persist_progress=persist_progress,
-        )
+        subscription_conn = self
+        close_connection_on_exit = False
+        if self._connection_factory is not None:
+            subscription_conn = self._connection_factory()
+            close_connection_on_exit = True
+
+        try:
+            sub = Subscription(
+                conn=subscription_conn,
+                handler=handler,
+                schema_name=schema_name,
+                sub_name=sub_name,
+                subscribe_from=subscribe_from,
+                retention_seconds=retention_seconds,
+                persist_progress=persist_progress,
+            )
+            sub.close_connection_on_exit = close_connection_on_exit
+        except Exception:
+            if close_connection_on_exit:
+                subscription_conn.close()
+            raise
         sub._run(output_format, max_batch_size)
 
 
@@ -486,14 +598,19 @@ class MaterializedView:
         atexit.register(self.conn.close)
 
     def _create(self, ignore_exist: bool = True):
+        qualified_name = self.conn._qualified_name(self.schema_name, self.name)
         if ignore_exist:
-            sql = f"CREATE MATERIALIZED VIEW IF NOT EXISTS {self.schema_name}.{self.name} AS {self.stmt}"
+            sql = (
+                f"CREATE MATERIALIZED VIEW IF NOT EXISTS "
+                f"{qualified_name} AS {self.stmt}"
+            )
         else:
-            sql = f"CREATE MATERIALIZED VIEW {self.schema_name}.{self.name} AS {self.stmt}"
+            sql = f"CREATE MATERIALIZED VIEW {qualified_name} AS {self.stmt}"
         return self.conn.execute(sql)
 
     def _delete(self):
-        sql = f"DROP MATERIALIZED VIEW {self.schema_name}.{self.name}"
+        qualified_name = self.conn._qualified_name(self.schema_name, self.name)
+        sql = f"DROP MATERIALIZED VIEW {qualified_name}"
         return self.conn.execute(sql)
 
     def on_change(
@@ -528,14 +645,24 @@ class Subscription:
         retention_seconds: int,
         persist_progress: bool = True,
     ):
+        if not callable(handler):
+            raise TypeError("handler must be callable")
+        if not isinstance(retention_seconds, int) or retention_seconds <= 0:
+            raise ValueError("retention_seconds must be a positive integer")
+
         self.conn: RisingWaveConnection = conn
         self.sub_name: str = sub_name
         self.schema_name: str = schema_name
         self.handler: SubscriptionHandler = handler
         self.persist_progress: bool = persist_progress
+        self.close_connection_on_exit = False
+        qualified_subscription = self.conn._qualified_name(schema_name, sub_name)
+        qualified_source = self.conn._qualified_name(schema_name, subscribe_from)
         _retry(
             lambda: self.conn.execute(
-                f"CREATE SUBSCRIPTION IF NOT EXISTS {self.schema_name}.{self.sub_name} FROM {self.schema_name}.{subscribe_from} WITH (retention = '{retention_seconds}s')"
+                f"CREATE SUBSCRIPTION IF NOT EXISTS {qualified_subscription} "
+                f"FROM {qualified_source} "
+                f"WITH (retention = '{retention_seconds}s')"
             ),
             1000,
             5,
@@ -556,35 +683,52 @@ class Subscription:
         wait_interval_ms: int = DEFAULT_CURSOR_IDLE_INTERVAL_MS,
         cursor_name: str = "default",
     ):
-        cursor_name = (
-            f"risingwave_py_cursor_{cursor_name}_{self.schema_name}_{self.sub_name}"
-            # https://github.com/risingwavelabs/risingwave/pull/20221
-            if self.conn.rw_version >= "2.3.0"
-            else f"{self.schema_name}.risingwave_py_cursor_{cursor_name}_{self.sub_name}"
-        )
-        print(cursor_name)
-        fully_qual_sub_name = f"{self.schema_name}.{self.sub_name}"
+        try:
+            if not isinstance(max_batch_size, int) or max_batch_size <= 0:
+                raise ValueError("max_batch_size must be a positive integer")
+            if wait_interval_ms < 0:
+                raise ValueError("wait_interval_ms must not be negative")
 
-        if self.persist_progress:
-            progress_row = self.conn.fetchone(
-                f"SELECT progress FROM risingwave_py_sub_progress WHERE sub_name = '{fully_qual_sub_name}'"
+            quoted_cursor_name = self.conn._quote_identifier(
+                f"risingwave_py_cursor_{cursor_name}_{self.schema_name}_{self.sub_name}"
             )
-            if progress_row is not None:
-                self.conn.execute(
-                    f"DECLARE {cursor_name} subscription cursor for {fully_qual_sub_name} SINCE {progress_row[0]}"
+
+            fully_qual_sub_name = f"{self.schema_name}.{self.sub_name}"
+            qualified_subscription = self.conn._qualified_name(
+                self.schema_name, self.sub_name
+            )
+
+            if self.persist_progress:
+                progress_row = self.conn.fetchone(
+                    """
+                    SELECT progress
+                    FROM risingwave_py_sub_progress
+                    WHERE sub_name = :sub_name
+                    """,
+                    OutputFormat.RAW,
+                    {"sub_name": fully_qual_sub_name},
                 )
+                if progress_row is not None:
+                    progress = int(progress_row[0])
+                    self.conn.execute(
+                        f"DECLARE {quoted_cursor_name} SUBSCRIPTION CURSOR "
+                        f"FOR {qualified_subscription} SINCE {progress}"
+                    )
+                else:
+                    self.conn.execute(
+                        f"DECLARE {quoted_cursor_name} SUBSCRIPTION CURSOR "
+                        f"FOR {qualified_subscription}"
+                    )
             else:
                 self.conn.execute(
-                    f"DECLARE {cursor_name} subscription cursor for {fully_qual_sub_name}"
+                    f"DECLARE {quoted_cursor_name} SUBSCRIPTION CURSOR "
+                    f"FOR {qualified_subscription}"
                 )
-        else:
-            self.conn.execute(
-                f"DECLARE {cursor_name} subscription cursor for {fully_qual_sub_name}"
-            )
-        while True:
-            try:
+
+            while True:
                 data = self.conn.fetch(
-                    f"FETCH {max_batch_size} FROM {cursor_name}", format=output_format
+                    f"FETCH {max_batch_size} FROM {quoted_cursor_name}",
+                    format=output_format,
                 )
                 if data is None or len(data) == 0:
                     time.sleep(wait_interval_ms / 1000)
@@ -596,23 +740,39 @@ class Subscription:
                     else:
                         progress = data[-1][-1]
                     self.conn.execute(
-                        f"INSERT INTO risingwave_py_sub_progress (sub_name, progress) VALUES ('{fully_qual_sub_name}', {progress})"
+                        """
+                        INSERT INTO risingwave_py_sub_progress (sub_name, progress)
+                        VALUES (:sub_name, :progress)
+                        """,
+                        {
+                            "sub_name": fully_qual_sub_name,
+                            "progress": int(progress),
+                        },
                     )
-            except KeyboardInterrupt:
-                logging.info(f"subscription {fully_qual_sub_name} is interrupted")
-                break
+        except KeyboardInterrupt:
+            logging.info(
+                "subscription %s.%s is interrupted",
+                self.schema_name,
+                self.sub_name,
+            )
+        finally:
+            if self.close_connection_on_exit:
+                self.conn.close()
 
 
 class RisingWave(RisingWaveConnection):
     def __init__(self, conn_options: RisingWaveConnOptions = None):
         self.local_risingwave: subprocess.Popen = None
         self.options: RisingWaveConnOptions = conn_options
-        self.rw_version: semver.Version = DEFAULT_RW_VERSION
+        self.rw_version: semver.Version = semver.Version.parse(DEFAULT_RW_VERSION)
         self.engine = None
         self.open()
 
         RisingWaveConnection.__init__(
-            self=self, conn=self._connect(), rw_version=self.rw_version
+            self=self,
+            conn=self._connect(),
+            rw_version=self.rw_version,
+            connection_factory=self.getconn,
         )
 
     def open(self):
@@ -629,20 +789,28 @@ class RisingWave(RisingWaveConnection):
                 stderr=subprocess.DEVNULL,
                 text=True,
             )
-            atexit.register(self.local_risingwave.kill)
+            atexit.register(self._stop_local_risingwave)
             self.options = RisingWaveConnOptions.from_connection_info(
                 host="localhost", port=4566, user="root", password="", database="dev"
             )
 
         def try_connect():
             # wait for the meta service is up
+            if self.engine is not None:
+                self.engine.dispose()
             self.engine = self._create_engine()
             with self.getconn() as conn:
                 version = conn.fetchone("SELECT version()")[0]
                 logging.info(f"connected to RisingWave. Version: {version}")
                 self.rw_version = extract_rw_version(version)
 
-        return _retry(try_connect, 500, 60)
+        try:
+            return _retry(try_connect, 500, 60)
+        except Exception:
+            if self.engine is not None:
+                self.engine.dispose()
+            self._stop_local_risingwave()
+            raise
 
     def _create_engine(self) -> Engine:
         return create_engine(self.options.dsn)
@@ -654,9 +822,21 @@ class RisingWave(RisingWaveConnection):
         return RisingWaveConnection(self._connect(), self.rw_version)
 
     def close(self):
-        self.conn.close()
-        if self.local_risingwave is not None:
-            self.local_risingwave.kill()
+        try:
+            super().close()
+        finally:
+            if self.engine is not None:
+                self.engine.dispose()
+            self._stop_local_risingwave()
+
+    def _stop_local_risingwave(self):
+        if self.local_risingwave is not None and self.local_risingwave.poll() is None:
+            self.local_risingwave.terminate()
+            try:
+                self.local_risingwave.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.local_risingwave.kill()
+                self.local_risingwave.wait(timeout=5)
 
     def mv(
         self,

@@ -51,7 +51,12 @@ Homepage = "https://github.com/risingwavelabs/risingwave-py"
 Issues = "https://github.com/risingwavelabs/risingwave-py/issues"
 
 [dependency-groups]
-dev = ["psycopg2-binary>=2.9.9", "websocket-client>=1.8.0"]
+dev = [
+    "psycopg2-binary>=2.9.9",
+    "pytest>=8.3",
+    "ruff>=0.12",
+    "websocket-client>=1.8.0",
+]
 
 
 [[tool.uv.index]]
