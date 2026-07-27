@@ -227,7 +227,8 @@ uv run --extra udf --extra multimodal python examples/multimodal_listing.py
 
 The same bundle can run as a foreground Arrow Flight service in a
 customer-owned AWS account. The application project must install
-`risingwave-py[udf]` so the generated image contains the runtime.
+`risingwave-py[udf]` and commit `pyproject.toml` plus `uv.lock` so the generated
+image contains a reproducible runtime.
 
 Prerequisites are Docker, AWS CLI v2 authentication, and the AWS principal that
 RisingWave Cloud will use for the PrivateLink consumer endpoint:
@@ -241,14 +242,23 @@ rw-udf deploy \
   --name policy-prod \
   --region us-east-1 \
   --aws-profile prod \
-  --allowed-principal arn:aws:iam::123456789012:root
+  --allowed-principal arn:aws:iam::123456789012:root \
+  --include models/policy.bin
 ```
 
-The command builds an immutable image, pushes it to ECR, and deploys a
-CloudFormation stack with a dedicated two-AZ VPC, two Fargate tasks by default,
-an internal Network Load Balancer, PrivateLink endpoint service, CloudWatch
-logs, and deployment rollback. Repeated deployments retain the endpoint
-service while creating a new image tag and task-definition revision.
+The generated Docker build uses digest-pinned Python and `uv` images,
+`uv sync --frozen`, and an explicit context allowlist: project metadata,
+`uv.lock`, the top-level package that owns `--module`, common readme/license
+files, and paths named by `--include`. Symlinks that escape the project are
+rejected. The deploy result records hashes for the complete build context,
+manifest, and lockfile together with the locked `risingwave-py` runtime
+version.
+
+The command pushes an immutable image to ECR and deploys a CloudFormation stack
+with a dedicated two-AZ VPC, two Fargate tasks by default, an internal Network
+Load Balancer, PrivateLink endpoint service, CloudWatch logs, and deployment
+rollback. Repeated deployments retain the endpoint service while creating a new
+image tag and task-definition revision.
 
 Deployment output is saved under `.rw-udf/deployments/<name>.json`. After the
 RisingWave Cloud PrivateLink flow provides the consumer-visible URL, validate
@@ -274,10 +284,9 @@ The deployment circuit breaker therefore rejects a runtime that only accepts
 TCP connections but is missing a function or advertises an incompatible Arrow
 schema.
 
-AWS credentials and source code are not sent to RisingWave Cloud. The generated
-Docker context excludes common credential, key, environment, VCS, build, and
-local-state paths. Runtime secrets should be injected through AWS-managed
-secret integrations.
+AWS credentials and source code are not sent to RisingWave Cloud. Undeclared
+project files are not copied into the Docker context. Runtime secrets should be
+injected through AWS-managed secret integrations.
 
 Run the optional Docker end-to-end test with:
 

@@ -163,6 +163,8 @@ def test_deploy_writes_state_file(deployer_type, monkeypatch, capsys, tmp_path):
             str(tmp_path),
             "--image-uri",
             "example.test/image:tag",
+            "--include",
+            "models/policy.bin",
             "--state-file",
             str(state_file),
         ]
@@ -170,3 +172,5 @@ def test_deploy_writes_state_file(deployer_type, monkeypatch, capsys, tmp_path):
 
     assert state_file.read_text() == result.to_json.return_value
     assert capsys.readouterr().out == result.to_json.return_value
+    config = deployer_type.call_args.args[0]
+    assert config.build_includes == ("models/policy.bin",)

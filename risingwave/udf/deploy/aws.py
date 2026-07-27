@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -16,6 +17,46 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 from ..bundle import BundleManifest
+
+DEFAULT_UV_VERSION = "0.9.30"
+DEFAULT_UV_IMAGE = (
+    "ghcr.io/astral-sh/uv:0.9.30"
+    "@sha256:538e0b39736e7feae937a65983e49d2ab75e1559d35041f9878b7b7e51de91e4"
+)
+DEFAULT_PYTHON_IMAGE = (
+    "python:3.12-slim"
+    "@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+)
+_COMMON_PROJECT_FILES = (
+    "README",
+    "README.md",
+    "README.rst",
+    "LICENSE",
+    "LICENSE.md",
+    "LICENSE.txt",
+    "NOTICE",
+    "uv.toml",
+)
+_BUILD_IGNORE_PATTERNS = (
+    ".git",
+    ".venv",
+    ".env",
+    ".env.*",
+    ".rw-udf",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".aws",
+    ".ssh",
+    "__pycache__",
+    "*.pyc",
+    "*.pem",
+    "*.key",
+    "credentials",
+    ".npmrc",
+    ".pypirc",
+    "dist",
+    "build",
+)
 
 
 class CommandError(RuntimeError):
@@ -81,6 +122,10 @@ class FargateConfig:
     port: int = 8815
     image_uri: str | None = None
     extras: tuple[str, ...] = ()
+    build_includes: tuple[str, ...] = ()
+    uv_version: str = DEFAULT_UV_VERSION
+    uv_image: str = DEFAULT_UV_IMAGE
+    python_image: str = DEFAULT_PYTHON_IMAGE
 
     def validate(self) -> None:
         if not isinstance(self.name, str) or not re.fullmatch(
@@ -146,6 +191,49 @@ class FargateConfig:
                 "invalid Python package extras: "
                 + ", ".join(str(value) for value in invalid_extras)
             )
+        if not isinstance(self.build_includes, tuple):
+            raise ValueError("build_includes must be a tuple of relative paths")
+        invalid_includes = [
+            value
+            for value in self.build_includes
+            if not isinstance(value, str)
+            or not value.strip()
+            or Path(value).is_absolute()
+            or ".." in Path(value).parts
+        ]
+        if invalid_includes:
+            raise ValueError(
+                "invalid build include paths: "
+                + ", ".join(str(value) for value in invalid_includes)
+            )
+        if not isinstance(self.uv_version, str) or not re.fullmatch(
+            r"\d+\.\d+\.\d+",
+            self.uv_version,
+        ):
+            raise ValueError("uv_version must be a pinned semantic version")
+        for name, image in (
+            ("uv_image", self.uv_image),
+            ("python_image", self.python_image),
+        ):
+            if not isinstance(image, str) or not re.search(
+                r"@sha256:[0-9a-f]{64}$",
+                image,
+            ):
+                raise ValueError(f"{name} must be pinned by a sha256 digest")
+        if f":{self.uv_version}@" not in self.uv_image:
+            raise ValueError("uv_image tag must match uv_version")
+
+
+@dataclass(frozen=True)
+class BuildMetadata:
+    """Content-addressed metadata for one generated image."""
+
+    image_uri: str
+    build_hash: str
+    manifest_hash: str
+    lock_hash: str
+    runtime_version: str
+    uv_version: str
 
 
 @dataclass(frozen=True)
@@ -159,6 +247,11 @@ class DeploymentResult:
     cluster_name: str
     service_name: str
     manifest: BundleManifest
+    build_hash: str | None = None
+    manifest_hash: str | None = None
+    lock_hash: str | None = None
+    runtime_version: str | None = None
+    uv_version: str | None = None
 
     def to_json(self) -> str:
         return (
@@ -188,10 +281,12 @@ class AwsFargateDeployer:
     def deploy(self, manifest: BundleManifest) -> DeploymentResult:
         self._require_tool("aws")
         image_uri = self.config.image_uri
+        build: BuildMetadata | None = None
         if image_uri is None:
             self._require_tool("docker")
             repository_uri = self._ensure_ecr_repository()
-            image_uri = self._build_and_push(repository_uri, manifest)
+            build = self._build_and_push(repository_uri, manifest)
+            image_uri = build.image_uri
 
         stack_name = f"rw-udf-{self.config.name}"
         self._deploy_stack(stack_name, image_uri)
@@ -214,6 +309,11 @@ class AwsFargateDeployer:
             cluster_name=outputs["ClusterName"],
             service_name=outputs["ServiceName"],
             manifest=manifest,
+            build_hash=None if build is None else build.build_hash,
+            manifest_hash=None if build is None else build.manifest_hash,
+            lock_hash=None if build is None else build.lock_hash,
+            runtime_version=None if build is None else build.runtime_version,
+            uv_version=None if build is None else build.uv_version,
         )
 
     def _require_tool(self, name: str) -> None:
@@ -262,58 +362,37 @@ class AwsFargateDeployer:
         self,
         repository_uri: str,
         manifest: BundleManifest,
-    ) -> str:
-        manifest_hash = hashlib.sha256(
-            manifest.to_json().encode(),
-        ).hexdigest()[:10]
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        tag = f"{timestamp}-{manifest_hash}-{uuid4().hex[:8]}"
-        image_uri = f"{repository_uri}:{tag}"
-        registry = repository_uri.split("/", 1)[0]
-        password = self.runner.run(
-            self._aws_command("ecr", "get-login-password"),
-        )
-        self.runner.run(
-            (
-                "docker",
-                "login",
-                "--username",
-                "AWS",
-                "--password-stdin",
-                registry,
-            ),
-            input_text=password,
-        )
-
+    ) -> BuildMetadata:
         with tempfile.TemporaryDirectory(prefix="rw-udf-build-") as directory:
             context = Path(directory) / "context"
-            shutil.copytree(
-                self.config.project_root,
+            (
+                build_hash,
+                manifest_hash,
+                lock_hash,
+                runtime_version,
+            ) = self._prepare_build_context(
                 context,
-                symlinks=True,
-                ignore=shutil.ignore_patterns(
-                    ".git",
-                    ".venv",
-                    ".env",
-                    ".env.*",
-                    ".rw-udf",
-                    ".pytest_cache",
-                    ".ruff_cache",
-                    ".aws",
-                    ".ssh",
-                    "__pycache__",
-                    "*.pyc",
-                    "*.pem",
-                    "*.key",
-                    "credentials",
-                    ".npmrc",
-                    ".pypirc",
-                    "dist",
-                    "build",
-                ),
+                manifest,
             )
             dockerfile = context / "Dockerfile.rw-udf"
-            dockerfile.write_text(self._dockerfile())
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+            tag = f"{timestamp}-{build_hash[:12]}-{uuid4().hex[:8]}"
+            image_uri = f"{repository_uri}:{tag}"
+            registry = repository_uri.split("/", 1)[0]
+            password = self.runner.run(
+                self._aws_command("ecr", "get-login-password"),
+            )
+            self.runner.run(
+                (
+                    "docker",
+                    "login",
+                    "--username",
+                    "AWS",
+                    "--password-stdin",
+                    registry,
+                ),
+                input_text=password,
+            )
             self.runner.run(
                 (
                     "docker",
@@ -326,12 +405,153 @@ class AwsFargateDeployer:
                 )
             )
         self.runner.run(("docker", "push", image_uri))
-        return image_uri
+        return BuildMetadata(
+            image_uri=image_uri,
+            build_hash=build_hash,
+            manifest_hash=manifest_hash,
+            lock_hash=lock_hash,
+            runtime_version=runtime_version,
+            uv_version=self.config.uv_version,
+        )
+
+    def _module_include(self) -> Path:
+        top_level = self.config.module.split(".", 1)[0]
+        candidates = (
+            Path(top_level),
+            Path(f"{top_level}.py"),
+            Path("src") / top_level,
+            Path("src") / f"{top_level}.py",
+        )
+        for candidate in candidates:
+            if (self.config.project_root / candidate).exists():
+                return candidate
+        raise ValueError(
+            f"cannot find source for module {self.config.module!r} under "
+            f"{self.config.project_root}; add its package with --include"
+        )
+
+    def _build_include_paths(self) -> tuple[Path, ...]:
+        required = (Path("pyproject.toml"), Path("uv.lock"))
+        missing = [
+            str(path)
+            for path in required
+            if not (self.config.project_root / path).is_file()
+        ]
+        if missing:
+            raise ValueError(
+                "generated UDF images require lockfile-driven projects; missing: "
+                + ", ".join(missing)
+            )
+        candidates = [
+            *required,
+            self._module_include(),
+            *(
+                Path(value)
+                for value in _COMMON_PROJECT_FILES
+                if (self.config.project_root / value).exists()
+            ),
+            *(Path(value) for value in self.config.build_includes),
+        ]
+        selected: list[Path] = []
+        for relative in sorted(
+            set(candidates), key=lambda path: (len(path.parts), str(path))
+        ):
+            source = self.config.project_root / relative
+            if not source.exists() and not source.is_symlink():
+                raise ValueError(f"build include does not exist: {relative}")
+            if any(
+                relative == parent or parent in relative.parents for parent in selected
+            ):
+                continue
+            selected.append(relative)
+        return tuple(selected)
+
+    def _validate_build_source(self, source: Path) -> None:
+        project_root = self.config.project_root.resolve()
+        paths = (source, *source.rglob("*")) if source.is_dir() else (source,)
+        for path in paths:
+            if not path.is_symlink():
+                continue
+            try:
+                target = path.resolve(strict=True)
+                target.relative_to(project_root)
+            except (FileNotFoundError, ValueError) as exc:
+                relative = path.relative_to(self.config.project_root)
+                raise ValueError(
+                    f"build context symlink escapes the project or is broken: "
+                    f"{relative}"
+                ) from exc
+
+    def _copy_build_source(self, relative: Path, context: Path) -> None:
+        source = self.config.project_root / relative
+        self._validate_build_source(source)
+        destination = context / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                destination,
+                symlinks=True,
+                ignore=shutil.ignore_patterns(*_BUILD_IGNORE_PATTERNS),
+            )
+        else:
+            shutil.copy2(source, destination, follow_symlinks=False)
+
+    @staticmethod
+    def _hash_context(context: Path) -> str:
+        digest = hashlib.sha256()
+        for path in sorted(context.rglob("*"), key=lambda value: value.as_posix()):
+            if path.is_dir():
+                continue
+            relative = path.relative_to(context).as_posix()
+            digest.update(relative.encode())
+            digest.update(b"\0")
+            if path.is_symlink():
+                digest.update(b"symlink\0")
+                digest.update(os.readlink(path).encode())
+            else:
+                digest.update(b"file\0")
+                with path.open("rb") as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    @staticmethod
+    def _locked_runtime_version(lock_text: str) -> str:
+        for block in re.split(r"(?m)^\[\[package\]\]\s*$", lock_text):
+            name = re.search(r'(?m)^name = "([^"]+)"$', block)
+            if name is None or name.group(1) != "risingwave-py":
+                continue
+            version = re.search(r'(?m)^version = "([^"]+)"$', block)
+            if version is not None:
+                return version.group(1)
+        raise ValueError(
+            "uv.lock does not contain risingwave-py; the deployed project must "
+            "install risingwave-py[udf]"
+        )
+
+    def _prepare_build_context(
+        self,
+        context: Path,
+        manifest: BundleManifest,
+    ) -> tuple[str, str, str, str]:
+        context.mkdir(parents=True)
+        for relative in self._build_include_paths():
+            self._copy_build_source(relative, context)
+        manifest_text = manifest.to_json()
+        (context / ".rw-udf-manifest.json").write_text(manifest_text)
+        (context / "Dockerfile.rw-udf").write_text(self._dockerfile())
+        lock_text = (context / "uv.lock").read_text()
+        return (
+            self._hash_context(context),
+            hashlib.sha256(manifest_text.encode()).hexdigest(),
+            hashlib.sha256(lock_text.encode()).hexdigest(),
+            self._locked_runtime_version(lock_text),
+        )
 
     def _dockerfile(self) -> str:
-        install_target = "."
-        if self.config.extras:
-            install_target = f".[{','.join(self.config.extras)}]"
+        extras = "".join(f" --extra {value}" for value in self.config.extras)
         command = json.dumps(
             [
                 "python",
@@ -344,10 +564,18 @@ class AwsFargateDeployer:
             ]
         )
         return (
-            "FROM python:3.12-slim\n"
+            f"FROM {self.config.python_image}\n"
+            f"COPY --from={self.config.uv_image} /uv /uvx /bin/\n"
+            "ENV UV_PROJECT_ENVIRONMENT=/opt/rw-udf \\\n"
+            '    PATH="/opt/rw-udf/bin:$PATH" \\\n'
+            "    UV_COMPILE_BYTECODE=1 \\\n"
+            "    UV_LINK_MODE=copy\n"
             "WORKDIR /app\n"
+            "COPY pyproject.toml uv.lock /app/\n"
+            "RUN uv sync --frozen --no-dev --no-install-project"
+            f"{extras}\n"
             "COPY . /app\n"
-            f'RUN python -m pip install --no-cache-dir "{install_target}"\n'
+            f"RUN uv sync --frozen --no-dev --no-editable{extras}\n"
             f"EXPOSE {self.config.port}\n"
             f"CMD {command}\n"
         )

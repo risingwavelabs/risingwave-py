@@ -78,6 +78,12 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         help="Python project extra to install",
     )
+    deploy.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="Additional project-relative path to include in the image",
+    )
     deploy.add_argument("--state-file", type=Path)
     return parser
 
@@ -140,6 +146,7 @@ def main(argv: list[str] | None = None) -> None:
         port=args.port,
         image_uri=args.image_uri,
         extras=tuple(args.extra),
+        build_includes=tuple(args.include),
     )
     result = AwsFargateDeployer(config).deploy(manifest)
     state_file = args.state_file or Path(".rw-udf/deployments") / f"{args.name}.json"
