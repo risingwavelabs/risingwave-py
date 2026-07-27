@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -17,6 +17,7 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 from ..bundle import BundleManifest
+from .state import DeploymentConfig, DeploymentResult
 
 DEFAULT_UV_VERSION = "0.9.30"
 DEFAULT_UV_IMAGE = (
@@ -179,6 +180,11 @@ class FargateConfig:
             not isinstance(self.image_uri, str) or not self.image_uri.strip()
         ):
             raise ValueError("image_uri must be a non-empty string")
+        if self.image_uri is not None and not re.search(
+            r"@sha256:[0-9a-f]{64}$",
+            self.image_uri,
+        ):
+            raise ValueError("image_uri must be pinned by a sha256 digest")
         if not isinstance(self.extras, tuple):
             raise ValueError("extras must be a tuple of project extra names")
         invalid_extras = [
@@ -229,40 +235,13 @@ class BuildMetadata:
     """Content-addressed metadata for one generated image."""
 
     image_uri: str
+    image_tag: str
+    image_digest: str
     build_hash: str
     manifest_hash: str
     lock_hash: str
     runtime_version: str
     uv_version: str
-
-
-@dataclass(frozen=True)
-class DeploymentResult:
-    """Stable infrastructure identifiers returned by a deployment."""
-
-    stack_name: str
-    image_uri: str
-    endpoint_service_name: str
-    load_balancer_dns: str
-    cluster_name: str
-    service_name: str
-    manifest: BundleManifest
-    build_hash: str | None = None
-    manifest_hash: str | None = None
-    lock_hash: str | None = None
-    runtime_version: str | None = None
-    uv_version: str | None = None
-
-    def to_json(self) -> str:
-        return (
-            json.dumps(
-                asdict(self),
-                indent=2,
-                sort_keys=True,
-                default=str,
-            )
-            + "\n"
-        )
 
 
 class AwsFargateDeployer:
@@ -278,7 +257,13 @@ class AwsFargateDeployer:
         self.config = config
         self.runner = runner or ProcessRunner()
 
-    def deploy(self, manifest: BundleManifest) -> DeploymentResult:
+    def deploy(
+        self,
+        manifest: BundleManifest,
+        *,
+        rollback_of: str | None = None,
+        source: DeploymentResult | None = None,
+    ) -> DeploymentResult:
         self._require_tool("aws")
         image_uri = self.config.image_uri
         build: BuildMetadata | None = None
@@ -287,6 +272,9 @@ class AwsFargateDeployer:
             repository_uri = self._ensure_ecr_repository()
             build = self._build_and_push(repository_uri, manifest)
             image_uri = build.image_uri
+        if source is not None and source.image_uri != image_uri:
+            raise ValueError("rollback source image does not match image_uri")
+        image_digest = image_uri.rsplit("@", 1)[-1]
 
         stack_name = f"rw-udf-{self.config.name}"
         self._deploy_stack(stack_name, image_uri)
@@ -301,19 +289,83 @@ class AwsFargateDeployer:
         if missing_outputs:
             missing = ", ".join(sorted(missing_outputs))
             raise RuntimeError(f"CloudFormation stack is missing outputs: {missing}")
+        deployed_at = datetime.now(timezone.utc)
         return DeploymentResult(
+            deployment_id=(
+                deployed_at.strftime("%Y%m%d%H%M%S") + "-" + uuid4().hex[:8]
+            ),
+            deployed_at=deployed_at.isoformat(),
             stack_name=stack_name,
             image_uri=image_uri,
+            image_tag=(
+                build.image_tag
+                if build is not None
+                else None
+                if source is None
+                else source.image_tag
+            ),
+            image_digest=image_digest,
             endpoint_service_name=outputs["EndpointServiceName"],
             load_balancer_dns=outputs["LoadBalancerDns"],
             cluster_name=outputs["ClusterName"],
             service_name=outputs["ServiceName"],
             manifest=manifest,
-            build_hash=None if build is None else build.build_hash,
-            manifest_hash=None if build is None else build.manifest_hash,
-            lock_hash=None if build is None else build.lock_hash,
-            runtime_version=None if build is None else build.runtime_version,
-            uv_version=None if build is None else build.uv_version,
+            config=self._deployment_config(),
+            build_hash=(
+                build.build_hash
+                if build is not None
+                else None
+                if source is None
+                else source.build_hash
+            ),
+            manifest_hash=(
+                build.manifest_hash
+                if build is not None
+                else (
+                    source.manifest_hash
+                    if source is not None and source.manifest_hash is not None
+                    else hashlib.sha256(manifest.to_json().encode()).hexdigest()
+                )
+            ),
+            lock_hash=(
+                build.lock_hash
+                if build is not None
+                else None
+                if source is None
+                else source.lock_hash
+            ),
+            runtime_version=(
+                build.runtime_version
+                if build is not None
+                else None
+                if source is None
+                else source.runtime_version
+            ),
+            uv_version=(
+                build.uv_version
+                if build is not None
+                else None
+                if source is None
+                else source.uv_version
+            ),
+            rollback_of=rollback_of,
+        )
+
+    def _deployment_config(self) -> DeploymentConfig:
+        return DeploymentConfig(
+            name=self.config.name,
+            module=self.config.module,
+            region=self.config.region,
+            allowed_principals=self.config.allowed_principals,
+            desired_count=self.config.desired_count,
+            cpu=self.config.cpu,
+            memory=self.config.memory,
+            port=self.config.port,
+            extras=self.config.extras,
+            build_includes=self.config.build_includes,
+            uv_version=self.config.uv_version,
+            uv_image=self.config.uv_image,
+            python_image=self.config.python_image,
         )
 
     def _require_tool(self, name: str) -> None:
@@ -405,14 +457,43 @@ class AwsFargateDeployer:
                 )
             )
         self.runner.run(("docker", "push", image_uri))
+        image_digest = self._ecr_image_digest(repository_uri, tag)
+        digest_uri = f"{repository_uri}@{image_digest}"
         return BuildMetadata(
-            image_uri=image_uri,
+            image_uri=digest_uri,
+            image_tag=image_uri,
+            image_digest=image_digest,
             build_hash=build_hash,
             manifest_hash=manifest_hash,
             lock_hash=lock_hash,
             runtime_version=runtime_version,
             uv_version=self.config.uv_version,
         )
+
+    def _ecr_image_digest(self, repository_uri: str, tag: str) -> str:
+        try:
+            repository_name = repository_uri.split("/", 1)[1]
+        except IndexError as exc:
+            raise RuntimeError(
+                f"cannot determine ECR repository name from {repository_uri!r}"
+            ) from exc
+        response = self._aws_json(
+            "ecr",
+            "describe-images",
+            "--repository-name",
+            repository_name,
+            "--image-ids",
+            f"imageTag={tag}",
+        )
+        details = response.get("imageDetails") or ()
+        if len(details) != 1:
+            raise RuntimeError(
+                f"ECR did not return one image for {repository_name}:{tag}"
+            )
+        digest = str(details[0].get("imageDigest", ""))
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise RuntimeError(f"ECR returned an invalid image digest: {digest!r}")
+        return digest
 
     def _module_include(self) -> Path:
         top_level = self.config.module.split(".", 1)[0]

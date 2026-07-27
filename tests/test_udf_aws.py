@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from risingwave.udf.bundle import BundleManifest, FunctionManifest
-from risingwave.udf.deploy.aws import AwsFargateDeployer, FargateConfig
+from risingwave.udf.deploy.aws import (
+    AwsFargateDeployer,
+    BuildMetadata,
+    FargateConfig,
+)
 
 
 class FakeRunner:
@@ -15,6 +19,16 @@ class FakeRunner:
 
     def run(self, command, *, cwd=None, input_text=None):
         self.calls.append((tuple(command), cwd, input_text))
+        if "describe-images" in command:
+            return json.dumps(
+                {
+                    "imageDetails": [
+                        {
+                            "imageDigest": "sha256:" + "a" * 64,
+                        }
+                    ]
+                }
+            )
         if "describe-stacks" in command:
             return json.dumps(
                 {
@@ -73,7 +87,9 @@ def _config(tmp_path: Path, **overrides):
         "project_root": tmp_path,
         "region": "us-east-1",
         "allowed_principals": ("arn:aws:iam::123456789012:root",),
-        "image_uri": ("123.dkr.ecr.us-east-1.amazonaws.com/rw-udf/policy:sha"),
+        "image_uri": (
+            "123.dkr.ecr.us-east-1.amazonaws.com/rw-udf/policy@sha256:" + "b" * 64
+        ),
     }
     values.update(overrides)
     return FargateConfig(**values)
@@ -123,6 +139,8 @@ def test_deploys_existing_image_as_cloudformation_stack(monkeypatch, tmp_path):
     assert result.endpoint_service_name == "svc.test"
     assert result.manifest == _manifest()
     assert result.build_hash is None
+    assert result.image_digest == "sha256:" + "b" * 64
+    assert result.config.name == "policy-prod"
 
 
 def test_generated_image_uses_locked_dependencies_and_pinned_builders(tmp_path):
@@ -143,6 +161,47 @@ def test_generated_image_installs_requested_extras(tmp_path):
     )
 
     assert "--extra multimodal" in deployer._dockerfile()
+
+
+def test_generated_image_is_deployed_by_resolved_digest(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "risingwave.udf.deploy.aws.shutil.which",
+        lambda _: "/usr/bin/tool",
+    )
+    runner = FakeRunner()
+    deployer = AwsFargateDeployer(
+        _config(tmp_path, image_uri=None),
+        runner=runner,
+    )
+    monkeypatch.setattr(
+        deployer,
+        "_ensure_ecr_repository",
+        lambda: "123.dkr.ecr.us-east-1.amazonaws.com/rw-udf/policy",
+    )
+    digest = "sha256:" + "c" * 64
+    monkeypatch.setattr(
+        deployer,
+        "_build_and_push",
+        lambda _repository, _manifest: BuildMetadata(
+            image_uri=("123.dkr.ecr.us-east-1.amazonaws.com/rw-udf/policy@" + digest),
+            image_tag=("123.dkr.ecr.us-east-1.amazonaws.com/rw-udf/policy:build"),
+            image_digest=digest,
+            build_hash="d" * 64,
+            manifest_hash="e" * 64,
+            lock_hash="f" * 64,
+            runtime_version="0.0.2",
+            uv_version="0.9.30",
+        ),
+    )
+
+    result = deployer.deploy(_manifest())
+
+    deploy_call = next(call[0] for call in runner.calls if "deploy" in call[0])
+    assert (
+        "ImageUri=123.dkr.ecr.us-east-1.amazonaws.com/rw-udf/policy@" + digest
+    ) in deploy_call
+    assert result.image_digest == digest
+    assert result.image_tag.endswith(":build")
 
 
 def test_build_context_is_an_explicit_allowlist(tmp_path):
@@ -186,7 +245,11 @@ def test_build_context_is_an_explicit_allowlist(tmp_path):
     assert "unrelated.txt" not in runner.context_files
     assert len(build.build_hash) == 64
     assert build.runtime_version == "0.0.2"
-    assert build.image_uri.startswith("123.dkr.ecr.us-east-1.amazonaws.com/repository:")
+    assert build.image_uri.startswith(
+        "123.dkr.ecr.us-east-1.amazonaws.com/repository@sha256:"
+    )
+    assert build.image_tag.startswith("123.dkr.ecr.us-east-1.amazonaws.com/repository:")
+    assert build.image_digest == "sha256:" + "a" * 64
 
 
 def test_build_context_rejects_escaping_symlinks(tmp_path):
@@ -271,6 +334,7 @@ def test_rejects_invalid_deployment_names(tmp_path, name):
         ("python_image", "python:3.12-slim", "sha256"),
         ("uv_image", "ghcr.io/astral-sh/uv:latest", "sha256"),
         ("uv_version", "latest", "semantic version"),
+        ("image_uri", "example.test/image:latest", "sha256"),
     ],
 )
 def test_rejects_unpinned_or_escaping_build_configuration(

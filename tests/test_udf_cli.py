@@ -3,7 +3,7 @@
 import json
 import subprocess
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from risingwave.udf import udf
@@ -132,8 +132,15 @@ def test_register_uses_existing_sdk_client(
     assert json.loads(capsys.readouterr().out)["registered"] == 1
 
 
+@patch("risingwave.udf.deploy.state.DeploymentStateStore")
 @patch("risingwave.udf.deploy.aws.AwsFargateDeployer")
-def test_deploy_writes_state_file(deployer_type, monkeypatch, capsys, tmp_path):
+def test_deploy_appends_state_history(
+    deployer_type,
+    state_store_type,
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
     module = ModuleType("test_udf_cli_deploy_module")
 
     @udf.returns("bigint")
@@ -162,7 +169,7 @@ def test_deploy_writes_state_file(deployer_type, monkeypatch, capsys, tmp_path):
             "--project-root",
             str(tmp_path),
             "--image-uri",
-            "example.test/image:tag",
+            "example.test/image@sha256:" + "a" * 64,
             "--include",
             "models/policy.bin",
             "--state-file",
@@ -170,7 +177,82 @@ def test_deploy_writes_state_file(deployer_type, monkeypatch, capsys, tmp_path):
         ]
     )
 
-    assert state_file.read_text() == result.to_json.return_value
+    state_store_type.assert_called_once_with(state_file, name="policy-prod")
+    state_store_type.return_value.append.assert_called_once_with(result)
     assert capsys.readouterr().out == result.to_json.return_value
     config = deployer_type.call_args.args[0]
     assert config.build_includes == ("models/policy.bin",)
+
+
+@patch("risingwave.udf.deploy.state.manifests_are_compatible", return_value=True)
+@patch("risingwave.udf.deploy.state.DeploymentStateStore")
+@patch("risingwave.udf.deploy.aws.AwsFargateDeployer")
+def test_rollback_uses_recorded_digest_and_appends_event(
+    deployer_type,
+    state_store_type,
+    compatible,
+    capsys,
+    tmp_path,
+):
+    manifest = MagicMock()
+    recorded = SimpleNamespace(
+        name="policy-prod",
+        module="app.udfs",
+        region="us-east-1",
+        allowed_principals=("arn:aws:iam::123456789012:root",),
+        desired_count=2,
+        cpu=1024,
+        memory=2048,
+        port=8815,
+        extras=("udf",),
+        build_includes=(),
+        uv_version="0.9.30",
+        uv_image=("ghcr.io/astral-sh/uv:0.9.30@sha256:" + "a" * 64),
+        python_image="python:3.12-slim@sha256:" + "b" * 64,
+    )
+    target = SimpleNamespace(
+        deployment_id="old-version",
+        image_uri="example.test/image@sha256:" + "c" * 64,
+        manifest=manifest,
+        config=recorded,
+    )
+    latest = SimpleNamespace(
+        deployment_id="new-version",
+        manifest=manifest,
+    )
+    history = state_store_type.return_value.load.return_value
+    history.latest = latest
+    history.find.return_value = target
+    result = MagicMock()
+    result.to_json.return_value = '{"rollback_of": "old-version"}\n'
+    deployer_type.return_value.deploy.return_value = result
+    state_file = tmp_path / "policy-prod.json"
+
+    main(
+        [
+            "rollback",
+            "--name",
+            "policy-prod",
+            "--version",
+            "old",
+            "--aws-profile",
+            "prod",
+            "--project-root",
+            str(tmp_path),
+            "--state-file",
+            str(state_file),
+        ]
+    )
+
+    history.find.assert_called_once_with("old")
+    compatible.assert_called_once_with(latest.manifest, target.manifest)
+    config = deployer_type.call_args.args[0]
+    assert config.image_uri == target.image_uri
+    assert config.aws_profile == "prod"
+    deployer_type.return_value.deploy.assert_called_once_with(
+        manifest,
+        rollback_of="old-version",
+        source=target,
+    )
+    state_store_type.return_value.append.assert_called_once_with(result)
+    assert capsys.readouterr().out == result.to_json.return_value

@@ -70,7 +70,7 @@ def _parser() -> argparse.ArgumentParser:
     deploy.add_argument("--port", type=int, default=8815)
     deploy.add_argument(
         "--image-uri",
-        help="Use an existing image and skip Docker/ECR",
+        help="Use an existing digest-pinned image and skip Docker/ECR",
     )
     deploy.add_argument(
         "--extra",
@@ -85,6 +85,16 @@ def _parser() -> argparse.ArgumentParser:
         help="Additional project-relative path to include in the image",
     )
     deploy.add_argument("--state-file", type=Path)
+
+    rollback = commands.add_parser(
+        "rollback",
+        help="Roll an AWS Fargate service back to a recorded image digest",
+    )
+    rollback.add_argument("--name", required=True)
+    rollback.add_argument("--version", required=True)
+    rollback.add_argument("--aws-profile")
+    rollback.add_argument("--project-root", type=Path, default=Path.cwd())
+    rollback.add_argument("--state-file", type=Path)
     return parser
 
 
@@ -131,6 +141,52 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     from .deploy.aws import AwsFargateDeployer, FargateConfig
+    from .deploy.state import DeploymentStateStore, manifests_are_compatible
+
+    if args.command == "rollback":
+        state_file = (
+            args.state_file or Path(".rw-udf/deployments") / f"{args.name}.json"
+        )
+        store = DeploymentStateStore(state_file, name=args.name)
+        history = store.load()
+        latest = history.latest
+        if latest is None:
+            raise RuntimeError(f"no deployment history found for {args.name!r}")
+        target = history.find(args.version)
+        if target.deployment_id == latest.deployment_id:
+            raise RuntimeError(f"deployment {target.deployment_id!r} is already active")
+        if not manifests_are_compatible(latest.manifest, target.manifest):
+            raise RuntimeError(
+                "rollback would change SQL-visible function signatures; "
+                "run an explicit SQL migration instead"
+            )
+        recorded = target.config
+        config = FargateConfig(
+            name=recorded.name,
+            module=recorded.module,
+            project_root=project_root,
+            region=recorded.region,
+            allowed_principals=recorded.allowed_principals,
+            aws_profile=args.aws_profile,
+            desired_count=recorded.desired_count,
+            cpu=recorded.cpu,
+            memory=recorded.memory,
+            port=recorded.port,
+            image_uri=target.image_uri,
+            extras=recorded.extras,
+            build_includes=recorded.build_includes,
+            uv_version=recorded.uv_version,
+            uv_image=recorded.uv_image,
+            python_image=recorded.python_image,
+        )
+        result = AwsFargateDeployer(config).deploy(
+            target.manifest,
+            rollback_of=target.deployment_id,
+            source=target,
+        )
+        store.append(result)
+        print(result.to_json(), end="")
+        return
 
     manifest = build_manifest(args.module)
     config = FargateConfig(
@@ -150,8 +206,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     result = AwsFargateDeployer(config).deploy(manifest)
     state_file = args.state_file or Path(".rw-udf/deployments") / f"{args.name}.json"
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(result.to_json())
+    DeploymentStateStore(state_file, name=args.name).append(result)
     print(result.to_json(), end="")
 
 

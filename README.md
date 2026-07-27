@@ -257,12 +257,26 @@ version.
 The command pushes an immutable image to ECR and deploys a CloudFormation stack
 with a dedicated two-AZ VPC, two Fargate tasks by default, an internal Network
 Load Balancer, PrivateLink endpoint service, CloudWatch logs, and deployment
-rollback. Repeated deployments retain the endpoint service while creating a new
-image tag and task-definition revision.
+rollback. CloudFormation receives the resolved ECR image digest rather than a
+mutable tag. Repeated deployments retain the endpoint service while creating a
+new task-definition revision.
 
-Deployment output is saved under `.rw-udf/deployments/<name>.json`. After the
-RisingWave Cloud PrivateLink flow provides the consumer-visible URL, validate
-the advertised function names and Arrow schemas before registration:
+Deployment output is appended atomically to the versioned history at
+`.rw-udf/deployments/<name>.json`; the previous image digests and manifests are
+not overwritten. Roll back to a compatible recorded version with:
+
+```bash
+rw-udf rollback \
+  --name policy-prod \
+  --version 202607280001 \
+  --aws-profile prod
+```
+
+Rollback refuses to change SQL-visible function signatures. Such a change
+requires an explicit SQL migration.
+
+After the RisingWave Cloud PrivateLink flow provides the consumer-visible URL,
+validate the advertised function names and Arrow schemas before registration:
 
 ```bash
 rw-udf validate \
