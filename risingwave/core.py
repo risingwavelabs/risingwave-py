@@ -9,12 +9,15 @@ import semver
 
 from enum import Enum
 from shutil import which
-from typing import Callable, Any
+from typing import TYPE_CHECKING, Callable, Any
 
 from sqlalchemy import create_engine, insert, table, column, text
 from sqlalchemy.engine import Connection, Engine, URL
 from sqlalchemy.sql import Executable
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .udf.manager import UdfManager
 
 SubscriptionHandler = Callable[[Any], None]
 
@@ -237,6 +240,18 @@ class RisingWaveConnection:
         self.rw_version: semver.Version = rw_version
         self._connection_factory = connection_factory
         self._lock = threading.RLock()
+        self._udf_manager: "UdfManager | None" = None
+
+    @property
+    def udf(self) -> "UdfManager":
+        """Access Python UDF registration without creating another DB client."""
+
+        with self._lock:
+            if self._udf_manager is None:
+                from .udf.manager import UdfManager
+
+                self._udf_manager = UdfManager(self)
+            return self._udf_manager
 
     @staticmethod
     def _normalize_execute_args(args):
@@ -485,12 +500,21 @@ class RisingWaveConnection:
         return result is not None
 
     def close(self):
-        with self._lock:
-            try:
+        # UdfManager.register() holds its own lock while calling execute().
+        # Do not hold the connection lock while closing the manager, which
+        # preserves that lock ordering. Flush while the UDF server is alive.
+        udf_manager = self._udf_manager
+        try:
+            with self._lock:
                 for insert_context in self._insert_ctx.values():
                     insert_context.flush()
+        finally:
+            try:
+                if udf_manager is not None:
+                    udf_manager.close()
             finally:
-                self.conn.close()
+                with self._lock:
+                    self.conn.close()
 
     def __enter__(self):
         return self

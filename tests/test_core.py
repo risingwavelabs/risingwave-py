@@ -123,6 +123,23 @@ class TestInsertContext(unittest.TestCase):
 
 
 class TestRisingWaveConnection(unittest.TestCase):
+    @patch("risingwave.udf.manager.UdfManager")
+    def test_udf_manager_is_lazy_reused_and_closed(self, manager_type):
+        raw_connection = MagicMock()
+        connection = RisingWaveConnection(
+            raw_connection,
+            Version.parse("2.3.0"),
+        )
+
+        self.assertIsNone(connection._udf_manager)
+        self.assertIs(connection.udf, manager_type.return_value)
+        self.assertIs(connection.udf, manager_type.return_value)
+        connection.close()
+
+        manager_type.assert_called_once_with(connection)
+        manager_type.return_value.close.assert_called_once_with()
+        raw_connection.close.assert_called_once_with()
+
     def test_execute_and_fetch_accept_parameter_mapping(self):
         raw_connection = create_engine("sqlite://").connect()
         self.addCleanup(raw_connection.close)

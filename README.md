@@ -155,8 +155,37 @@ rw-udf manifest --module my_project.udfs
 rw-udf serve --module my_project.udfs --port 8815
 ```
 
-Database registration and managed local/deployment workflows will be layered on
-this runtime without introducing a second RisingWave database client.
+Register a function through the same `RisingWave` connection used for SQL. With
+no URL, the SDK starts and owns a local Arrow Flight server:
+
+```python
+from risingwave import RisingWave, RisingWaveConnOptions
+
+
+with RisingWave(RisingWaveConnOptions("risingwave://root@localhost:4566/dev")) as rw:
+    rw.udf.register(policy_check)
+```
+
+For Docker or another topology, configure the bind address and the URL visible
+to RisingWave before the first local registration:
+
+```python
+rw.udf.configure_local(
+    udf_url="http://host.docker.internal:8815",
+).register(policy_check)
+```
+
+To register an already-running remote bundle without starting a local server:
+
+```python
+rw.udf.register_bundle(
+    "my_project.udfs",
+    udf_url="http://private-link-endpoint:8815",
+)
+```
+
+Registration uses the existing `RisingWaveConnection`; it does not install or
+open a second database client.
 
 ## Demo
 You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).

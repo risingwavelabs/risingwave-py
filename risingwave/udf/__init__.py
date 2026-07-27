@@ -5,5 +5,6 @@ Importing this module does not load the optional Arrow Flight runtime. Install
 """
 
 from .decorators import UdfDefinition, udf
+from .manager import UdfManager
 
-__all__ = ["UdfDefinition", "udf"]
+__all__ = ["UdfDefinition", "UdfManager", "udf"]
