@@ -52,12 +52,14 @@ Issues = "https://github.com/risingwavelabs/risingwave-py/issues"
 
 [project.optional-dependencies]
 udf = ["arrow-udf==0.3.1"]
+multimodal = ["Pillow>=11,<12"]
 
 [project.scripts]
 rw-udf = "risingwave.udf.cli:main"
 
 [dependency-groups]
 dev = [
+    "Pillow>=11,<12",
     "psycopg2-binary>=2.9.9",
     "pytest>=8.3",
     "ruff>=0.12",

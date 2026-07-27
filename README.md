@@ -187,6 +187,86 @@ rw.udf.register_bundle(
 Registration uses the existing `RisingWaveConnection`; it does not install or
 open a second database client.
 
+### Local Docker workflow
+
+`DockerStandalone` starts a pinned, in-memory RisingWave single-node container
+and returns the normal `RisingWave` client. It also configures the local UDF
+address that is reachable from the container:
+
+```python
+from risingwave.local import DockerStandalone
+
+
+with DockerStandalone() as standalone:
+    with standalone.connect() as rw:
+        rw.udf.register(policy_check)
+        rw.execute(
+            "CREATE TABLE documents "
+            "(id INTEGER PRIMARY KEY, text VARCHAR)"
+        )
+```
+
+The context manager only stops a container it started. Set
+`RISINGWAVE_LOCAL_IMAGE` to test another RisingWave image. A complete example is
+available in `examples/udf_demo.py`.
+
+The offline `examples/multimodal_listing.py` example uses text and PNG bytes to
+produce deterministic JSONB quality findings and incrementally maintained
+alerts, duplicate-image groups, and seller-risk summaries:
+
+```bash
+uv run --extra udf --extra multimodal python examples/multimodal_listing.py
+```
+
+### Deploy to AWS Fargate
+
+The same bundle can run as a foreground Arrow Flight service in a
+customer-owned AWS account. The application project must install
+`risingwave-py[udf]` so the generated image contains the runtime.
+
+Prerequisites are Docker, AWS CLI v2 authentication, and the AWS principal that
+RisingWave Cloud will use for the PrivateLink consumer endpoint:
+
+```bash
+aws sso login --profile prod
+
+rw-udf deploy \
+  --module my_project.udfs \
+  --target aws-fargate \
+  --name policy-prod \
+  --region us-east-1 \
+  --aws-profile prod \
+  --allowed-principal arn:aws:iam::123456789012:root
+```
+
+The command builds an immutable image, pushes it to ECR, and deploys a
+CloudFormation stack with a dedicated two-AZ VPC, two Fargate tasks by default,
+an internal Network Load Balancer, PrivateLink endpoint service, CloudWatch
+logs, and deployment rollback. Repeated deployments retain the endpoint
+service while creating a new image tag and task-definition revision.
+
+Deployment output is saved under `.rw-udf/deployments/<name>.json`. After the
+RisingWave Cloud PrivateLink flow provides the consumer-visible URL, register
+the deployed bundle through the existing SDK client:
+
+```bash
+rw-udf register \
+  --module my_project.udfs \
+  --dsn 'risingwave://user:password@host:4566/database?sslmode=require' \
+  --udf-url 'http://private-link-endpoint:8815'
+```
+
+AWS credentials and source code are not sent to RisingWave Cloud. The generated
+Docker context excludes common credential, key, environment, VCS, build, and
+local-state paths. Runtime secrets should be injected through AWS-managed
+secret integrations.
+
+Run the optional Docker end-to-end test with:
+
+```bash
+RW_LOCAL_E2E=1 uv run --extra udf pytest tests/test_udf_e2e.py
+```
+
 ## Demo
 You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).
 
