@@ -31,7 +31,8 @@ jobs:
         run: |
           uv run ruff format --check risingwave tests
           uv run ruff check risingwave tests
-          uv run python -m unittest discover -v
+          uv run pytest -q
+          uv run --extra udf python -c "import arrow_udf, pyarrow"
 
       - name: Build package
         run: |

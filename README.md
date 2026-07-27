@@ -126,6 +126,38 @@ rw.insert(table_name="test_product", data=test_df3)
 ### You should be able to see the changes in for product and product avg price console now!
 ```
 
+## Python UDF definitions
+
+Python UDF support lives in the same `risingwave-py` SDK and uses
+`arrow-udf` as an optional Arrow Flight runtime:
+
+```bash
+pip install "risingwave-py[udf]"
+```
+
+Define UDFs in a normal Python module:
+
+```python
+from risingwave.udf import udf
+
+
+@udf.returns("varchar")
+def policy_check(text: str):
+    if text and "missing signature" in text.lower():
+        return "missing_signature"
+    return None
+```
+
+Inspect or serve all decorated functions owned by that module:
+
+```bash
+rw-udf manifest --module my_project.udfs
+rw-udf serve --module my_project.udfs --port 8815
+```
+
+Database registration and managed local/deployment workflows will be layered on
+this runtime without introducing a second RisingWave database client.
+
 ## Demo
 You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).
 
