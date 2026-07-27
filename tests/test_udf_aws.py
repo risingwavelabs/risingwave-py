@@ -170,6 +170,8 @@ def test_template_uses_consolidated_runtime():
     ).read_text()
 
     assert "risingwave.udf.runtime" in template
+    assert "risingwave.udf.health" in template
+    assert "HealthCheck:" in template
     assert "risingwave_local" not in template
 
 

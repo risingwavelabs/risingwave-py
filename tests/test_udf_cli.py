@@ -55,6 +55,39 @@ def test_imports_do_not_eagerly_load_arrow_runtime():
     assert completed.returncode == 0, completed.stderr
 
 
+@patch("risingwave.udf.health.validate_flight_manifest")
+def test_validate_checks_remote_manifest(validate, monkeypatch, capsys, tmp_path):
+    module = ModuleType("test_udf_cli_validate_module")
+
+    @udf.returns("bigint")
+    def identity(value: int):
+        return value
+
+    identity.func.__module__ = module.__name__
+    module.identity = identity
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    validate.return_value = ("identity",)
+
+    main(
+        [
+            "validate",
+            "--module",
+            module.__name__,
+            "--udf-url",
+            "http://private-link.internal:8815",
+            "--project-root",
+            str(tmp_path),
+        ]
+    )
+
+    manifest = validate.call_args.args[1]
+    assert manifest.module == module.__name__
+    assert json.loads(capsys.readouterr().out) == {
+        "ready": True,
+        "functions": ["identity"],
+    }
+
+
 @patch("risingwave.RisingWave")
 @patch("risingwave.RisingWaveConnOptions")
 def test_register_uses_existing_sdk_client(

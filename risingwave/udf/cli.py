@@ -26,6 +26,16 @@ def _parser() -> argparse.ArgumentParser:
     server.add_argument("--port", type=int, default=8815)
     server.add_argument("--project-root", type=Path, default=Path.cwd())
 
+    validate = commands.add_parser(
+        "validate",
+        help="Validate a deployed bundle over Arrow Flight",
+    )
+    validate.add_argument("--module", required=True)
+    validate.add_argument("--udf-url", required=True)
+    validate.add_argument("--timeout", type=float, default=5)
+    validate.add_argument("--allow-extra-functions", action="store_true")
+    validate.add_argument("--project-root", type=Path, default=Path.cwd())
+
     register = commands.add_parser(
         "register",
         help="Register a deployed bundle in RisingWave",
@@ -83,6 +93,17 @@ def main(argv: list[str] | None = None) -> None:
         from .runtime import serve
 
         serve(args.module, host=args.host, port=args.port)
+        return
+    if args.command == "validate":
+        from .health import validate_flight_manifest
+
+        functions = validate_flight_manifest(
+            args.udf_url,
+            build_manifest(args.module),
+            timeout=args.timeout,
+            allow_extra_functions=args.allow_extra_functions,
+        )
+        print(json.dumps({"ready": True, "functions": functions}, indent=2))
         return
     if args.command == "register":
         from risingwave import RisingWave, RisingWaveConnOptions

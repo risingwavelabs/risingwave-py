@@ -172,6 +172,18 @@ Resources:
           PortMappings:
             - ContainerPort: !Ref ContainerPort
               Protocol: tcp
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Sub >-
+                  python -m risingwave.udf.health
+                  --module ${UdfModule}
+                  --udf-url http://127.0.0.1:${ContainerPort}
+                  --timeout 5
+            Interval: 10
+            Timeout: 8
+            Retries: 3
+            StartPeriod: 10
           LogConfiguration:
             LogDriver: awslogs
             Options:

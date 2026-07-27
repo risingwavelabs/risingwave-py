@@ -246,8 +246,16 @@ logs, and deployment rollback. Repeated deployments retain the endpoint
 service while creating a new image tag and task-definition revision.
 
 Deployment output is saved under `.rw-udf/deployments/<name>.json`. After the
-RisingWave Cloud PrivateLink flow provides the consumer-visible URL, register
-the deployed bundle through the existing SDK client:
+RisingWave Cloud PrivateLink flow provides the consumer-visible URL, validate
+the advertised function names and Arrow schemas before registration:
+
+```bash
+rw-udf validate \
+  --module my_project.udfs \
+  --udf-url 'http://private-link-endpoint:8815'
+```
+
+Then register the deployed bundle through the existing SDK client:
 
 ```bash
 rw-udf register \
@@ -255,6 +263,11 @@ rw-udf register \
   --dsn 'risingwave://user:password@host:4566/database?sslmode=require' \
   --udf-url 'http://private-link-endpoint:8815'
 ```
+
+Fargate uses the same manifest validation as its ECS container health check.
+The deployment circuit breaker therefore rejects a runtime that only accepts
+TCP connections but is missing a function or advertises an incompatible Arrow
+schema.
 
 AWS credentials and source code are not sent to RisingWave Cloud. The generated
 Docker context excludes common credential, key, environment, VCS, build, and
