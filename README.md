@@ -185,7 +185,12 @@ rw.udf.register_bundle(
 ```
 
 Registration uses the existing `RisingWaveConnection`; it does not install or
-open a second database client.
+open a second database client. Before issuing DDL, it validates the complete
+Flight manifest and compares it with `SHOW FUNCTIONS`. New functions are
+created, unchanged signatures are left in place, and existing functions are
+never dropped automatically. A changed return type or endpoint requires an
+explicit migration so dependent materialized views cannot be broken by a
+repeat deployment.
 
 ### Local Docker workflow
 

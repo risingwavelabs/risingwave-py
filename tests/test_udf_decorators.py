@@ -5,6 +5,7 @@ from typing import Optional
 import pytest
 
 from risingwave.udf import UdfDefinition, udf
+from risingwave.udf.decorators import parse_type
 
 
 def test_infers_scalar_and_optional_types():
@@ -59,3 +60,9 @@ def test_rejects_invalid_options():
         @udf.returns("varchar", io_threads=0)
         def invalid_threads(value: str):
             return value
+
+
+def test_parses_risingwave_catalog_type_names():
+    assert parse_type("character varying").sql == "VARCHAR"
+    assert parse_type("timestamp without time zone").sql == "TIMESTAMP"
+    assert parse_type("time without time zone[]").sql == "TIME[]"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from types import ModuleType
 
@@ -65,6 +66,15 @@ def discover_module_udfs(module: ModuleType) -> tuple[UdfDefinition, ...]:
 def build_manifest(module_name: str) -> BundleManifest:
     """Build a serializable manifest for an importable UDF module."""
 
+    return build_manifest_from_definitions(module_name, discover_udfs(module_name))
+
+
+def build_manifest_from_definitions(
+    module_name: str,
+    definitions: Iterable[UdfDefinition],
+) -> BundleManifest:
+    """Build a manifest from an already-discovered, validated definition set."""
+
     functions = tuple(
         FunctionManifest(
             name=definition.name,
@@ -73,6 +83,6 @@ def build_manifest(module_name: str) -> BundleManifest:
             batch=definition.batch,
             io_threads=definition.io_threads,
         )
-        for definition in discover_udfs(module_name)
+        for definition in definitions
     )
     return BundleManifest(module=module_name, functions=functions)

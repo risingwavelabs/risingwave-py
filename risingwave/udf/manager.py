@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from typing import Protocol
 
-from .bundle import discover_udfs
-from .decorators import UdfDefinition
+from .bundle import build_manifest_from_definitions, discover_udfs
+from .decorators import UdfDefinition, parse_type
+from .health import validate_flight_manifest
 from .server import ArrowFlightUdfServer
 
 DEFAULT_UDF_HOST = "0.0.0.0"
@@ -16,6 +18,23 @@ DEFAULT_UDF_URL = f"http://127.0.0.1:{DEFAULT_UDF_PORT}"
 
 class _RisingWaveConnection(Protocol):
     def execute(self, sql: str, *args) -> None: ...
+
+    def fetch(self, sql: str, *args) -> list[tuple]: ...
+
+    def fetchone(self, sql: str, *args) -> tuple | None: ...
+
+
+@dataclass(frozen=True)
+class _RegisteredFunction:
+    name: str
+    input_types: tuple[str, ...]
+    return_type: str
+    language: str
+    link: str | None
+
+
+class UdfRegistrationConflict(RuntimeError):
+    """An existing SQL function cannot be changed without an explicit migration."""
 
 
 def _validate_definition(definition: UdfDefinition) -> None:
@@ -56,6 +75,40 @@ def drop_function_sql(definition: UdfDefinition) -> str:
     function_name = _quote_identifier(definition.name)
     arguments = ", ".join(value.sql for value in definition.input_types)
     return f"DROP FUNCTION IF EXISTS {function_name}({arguments})"
+
+
+def _normalize_catalog_type(value: str) -> str:
+    try:
+        return parse_type(value).sql
+    except (AttributeError, ValueError) as exc:
+        raise RuntimeError(
+            f"RisingWave returned an unsupported function type {value!r}"
+        ) from exc
+
+
+def _catalog_input_types(value: str) -> tuple[str, ...]:
+    if not value.strip():
+        return ()
+    return tuple(_normalize_catalog_type(item) for item in value.split(","))
+
+
+def _catalog_function(row: tuple) -> _RegisteredFunction:
+    if len(row) != 5:
+        raise RuntimeError(
+            "SHOW FUNCTIONS returned an unexpected row; expected name, arguments, "
+            "return type, language, and link"
+        )
+    name, arguments, return_type, language, link = row
+    # RisingWave 2.7 and later qualify names with their schema. Decorated UDF
+    # names are deliberately restricted to simple Python identifiers.
+    unqualified_name = str(name).rsplit(".", 1)[-1]
+    return _RegisteredFunction(
+        name=unqualified_name,
+        input_types=_catalog_input_types(str(arguments)),
+        return_type=_normalize_catalog_type(str(return_type)),
+        language=str(language),
+        link=None if link is None else str(link),
+    )
 
 
 class UdfManager:
@@ -118,17 +171,75 @@ class UdfManager:
             )
         return self._server
 
-    def _execute_registration(
+    def _local_validation_url(self) -> str:
+        host = self._local_host
+        if host == "0.0.0.0":
+            host = "127.0.0.1"
+        elif host in ("::", "[::]"):
+            host = "::1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"http://{host}:{self._local_port}"
+
+    def _registration_plan(
         self,
-        definition: UdfDefinition,
+        definitions: tuple[UdfDefinition, ...],
         udf_url: str,
-    ) -> str:
-        ddl = create_function_sql(definition, udf_url)
-        # RisingWave does not implement CREATE OR REPLACE FUNCTION. Keep the
-        # drop non-cascading so registration never removes dependent objects.
-        self._connection.execute(drop_function_sql(definition))
-        self._connection.execute(ddl)
-        return ddl
+    ) -> tuple[str, ...]:
+        schema_row = self._connection.fetchone("SELECT current_schema()")
+        if schema_row is None or not schema_row or not schema_row[0]:
+            raise RuntimeError("RisingWave did not return a current schema")
+        schema = _quote_identifier(str(schema_row[0]))
+        existing_rows = self._connection.fetch(f"SHOW FUNCTIONS FROM {schema}")
+        existing = {
+            (function.name, function.input_types): function
+            for function in map(_catalog_function, existing_rows)
+        }
+        statements: list[str] = []
+        for definition in definitions:
+            signature = (
+                definition.name,
+                tuple(value.sql for value in definition.input_types),
+            )
+            current = existing.get(signature)
+            if current is None:
+                statements.append(create_function_sql(definition, udf_url))
+                continue
+            expected_return = definition.return_type.sql
+            if current.return_type == expected_return and current.link == udf_url:
+                continue
+            rendered_signature = ", ".join(signature[1])
+            raise UdfRegistrationConflict(
+                f"function {definition.name}({rendered_signature}) already exists "
+                f"with return type {current.return_type} and link {current.link!r}; "
+                "create a new SQL function or run an explicit migration"
+            )
+        return tuple(statements)
+
+    def _register_definitions(
+        self,
+        module: str,
+        definitions: tuple[UdfDefinition, ...],
+        udf_url: str,
+        *,
+        validation_url: str | None = None,
+        allow_extra_functions: bool = False,
+    ) -> tuple[str, ...]:
+        manifest = build_manifest_from_definitions(module, definitions)
+        # Validate the complete remote bundle before any DDL. CREATE FUNCTION
+        # also validates one signature, but doing that inside a sequence can
+        # leave a partially registered bundle.
+        validate_flight_manifest(
+            validation_url or udf_url,
+            manifest,
+            allow_extra_functions=allow_extra_functions,
+        )
+        statements = self._registration_plan(definitions, udf_url)
+        # Only additions are automatic. Existing functions are never dropped,
+        # so a later failure cannot break the previously working function set.
+        for statement in statements:
+            self._connection.execute(statement)
+        return statements
 
     def register(
         self,
@@ -151,7 +262,21 @@ class UdfManager:
                 server.add(definition)
                 server.start()
                 udf_url = self._local_url
-            return self._execute_registration(definition, udf_url)
+                validation_url = self._local_validation_url()
+            else:
+                validation_url = None
+            statements = self._register_definitions(
+                definition.func.__module__,
+                (definition,),
+                udf_url,
+                validation_url=validation_url,
+                allow_extra_functions=True,
+            )
+            return (
+                statements[0]
+                if statements
+                else create_function_sql(definition, udf_url)
+            )
 
     def register_bundle(
         self,
@@ -170,9 +295,14 @@ class UdfManager:
                     server.add(definition)
                 server.start()
                 udf_url = self._local_url
-            return tuple(
-                self._execute_registration(definition, udf_url)
-                for definition in definitions
+                validation_url = self._local_validation_url()
+            else:
+                validation_url = None
+            return self._register_definitions(
+                module,
+                definitions,
+                udf_url,
+                validation_url=validation_url,
             )
 
     def close(self) -> None:
