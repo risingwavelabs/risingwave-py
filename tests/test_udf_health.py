@@ -3,13 +3,18 @@
 from dataclasses import replace
 
 import pyarrow as pa
-import pyarrow.flight as flight
 import pytest
+from pyarrow import flight
 
-from risingwave.udf.bundle import BundleManifest, FunctionManifest
+from risingwave.udf.bundle import (
+    BundleManifest,
+    FunctionManifest,
+    manifest_sha256,
+)
 from risingwave.udf.health import (
     FlightManifestError,
     _flight_location,
+    main,
     validate_flight_manifest,
 )
 
@@ -46,9 +51,13 @@ def _manifest():
 def _info(
     *,
     name="policy_check",
-    input_types=(pa.string(), pa.int64()),
-    return_type=pa.bool_(),
+    input_types=None,
+    return_type=None,
 ):
+    if input_types is None:
+        input_types = (pa.string(), pa.int64())
+    if return_type is None:
+        return_type = pa.bool_()
     schema = pa.schema(
         [
             *(
@@ -129,6 +138,33 @@ def test_wraps_unavailable_service(monkeypatch):
         validate_flight_manifest("http://private.test:8815", _manifest())
 
     assert isinstance(exc_info.value.__cause__, OSError)
+
+
+def test_health_cli_uses_the_hash_bound_baked_manifest(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    manifest = _manifest()
+    path = tmp_path / ".rw-udf-manifest.json"
+    path.write_text(manifest.to_json())
+    monkeypatch.setattr(
+        "risingwave.udf.health.validate_flight_manifest",
+        lambda _url, actual, **_kwargs: ("policy_check",) if actual == manifest else (),
+    )
+
+    main(
+        [
+            "--manifest-file",
+            str(path),
+            "--manifest-sha256",
+            manifest_sha256(manifest),
+            "--udf-url",
+            "http://127.0.0.1:8815",
+        ]
+    )
+
+    assert '"ready": true' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

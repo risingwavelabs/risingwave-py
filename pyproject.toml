@@ -52,6 +52,7 @@ Issues = "https://github.com/risingwavelabs/risingwave-py/issues"
 
 [project.optional-dependencies]
 udf = ["arrow-udf==0.3.1"]
+multimodal = ["Pillow>=11,<12"]
 
 [project.scripts]
 rw-udf = "risingwave.udf.cli:main"

@@ -178,7 +178,7 @@ local_udfs.register(policy_check)
 # can call policy_check.
 # ...
 
-rw.close()          # Closes only the database connection.
+rw.close()  # Closes only the database connection.
 local_udfs.close()  # Stop only after no RisingWave job uses this endpoint.
 ```
 
@@ -252,6 +252,138 @@ uv run --no-default-groups --group example-cpu-inference-udf --extra udf \
 
 Register and query it with
 [`examples/cpu_inference_udfs.sql`](examples/cpu_inference_udfs.sql).
+
+### Local Docker workflow
+
+`DockerStandalone` starts a pinned, in-memory RisingWave single-node container
+and returns the normal `RisingWave` client. It also configures the local UDF
+address that is reachable from the container:
+
+```python
+from risingwave.local import DockerStandalone
+
+
+with DockerStandalone() as standalone:
+    with standalone.connect() as rw:
+        rw.udf.register(policy_check)
+        rw.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, text VARCHAR)")
+```
+
+The context manager stops a container it started and then closes every local
+Flight server configured through `standalone.connect()`. Reusing a named
+container is allowed only when it was created by `DockerStandalone` with the
+same managed configuration. Set `RISINGWAVE_LOCAL_IMAGE` to test another
+RisingWave image. A complete example is available in `examples/udf_demo.py`.
+
+The offline `examples/multimodal_listing.py` example uses text and PNG bytes to
+produce deterministic JSONB quality findings and incrementally maintained
+alerts, duplicate-image groups, and seller-risk summaries:
+
+```bash
+uv run --extra udf --extra multimodal python examples/multimodal_listing.py
+```
+
+### Deploy to AWS Fargate
+
+The same bundle can run as a foreground Arrow Flight service in a
+customer-owned AWS account. The application project must install
+`risingwave-py[udf]` and commit `pyproject.toml` plus `uv.lock` so the generated
+image contains a reproducible runtime.
+
+Prerequisites are Docker, AWS CLI v2 authentication, and the explicit IAM
+account root, role, or user ARN that RisingWave Cloud will use for the
+PrivateLink consumer endpoint. Wildcards such as `*` or `role/*` are rejected
+because the endpoint service automatically accepts authorized connections:
+
+```bash
+aws sso login --profile prod
+
+rw-udf deploy \
+  --module my_project.udfs \
+  --target aws-fargate \
+  --name policy-prod \
+  --region us-east-1 \
+  --aws-profile prod \
+  --cpu-architecture X86_64 \
+  --allowed-principal arn:aws:iam::123456789012:root \
+  --include models/policy.bin
+```
+
+The generated Docker build uses digest-pinned Python and `uv` images,
+`uv sync --frozen`, and an explicit context allowlist: project metadata,
+`uv.lock`, the top-level package that owns `--module`, common readme/license
+files, and paths named by `--include`. Symlinks that escape the project are
+rejected. The deploy result records hashes for the complete build context,
+manifest, and lockfile together with the locked `risingwave-py` runtime
+version. The image bakes the manifest at `/app/.rw-udf-manifest.json`;
+container startup and readiness both verify its exact SHA-256 against the
+deployment request. An image supplied with `--image-uri` must follow the same
+contract or its rollout is rejected.
+
+`--cpu-architecture` defaults to `X86_64` and also accepts `ARM64`. The Docker
+build platform, build hash, recorded deployment config, and ECS
+`RuntimePlatform` all use that explicit value, so an image built on Apple
+Silicon is not accidentally scheduled on an incompatible Fargate runtime.
+
+The command pushes an immutable image to ECR and deploys a CloudFormation stack
+with a dedicated two-AZ VPC, two Fargate tasks by default, an internal Network
+Load Balancer, PrivateLink endpoint service, CloudWatch logs, and deployment
+rollback. CloudFormation receives the resolved ECR image digest rather than a
+mutable tag. Repeated deployments retain the endpoint service while creating a
+new task-definition revision.
+
+Deployment output is appended atomically to the versioned history at
+`.rw-udf/deployments/<name>.json`; the previous image digests and manifests are
+not overwritten. Each entry is bound to the AWS account, region, and
+CloudFormation stack ARN; a state file from another environment is rejected
+before any deployment mutation. Roll back to a compatible recorded version
+with:
+
+```bash
+rw-udf rollback \
+  --name policy-prod \
+  --version 202607280001 \
+  --aws-profile prod
+```
+
+Rollback changes only the recorded image, module, and manifest. It preserves
+the active deployment's port, capacity, build settings, and PrivateLink
+principals so an old release cannot restore revoked access or invalidate the
+consumer URL. Rollback also refuses to change SQL-visible function signatures;
+such a change requires an explicit SQL migration.
+
+After the RisingWave Cloud PrivateLink flow provides the consumer-visible URL,
+validate the advertised function names and Arrow schemas before registration:
+
+```bash
+rw-udf validate \
+  --module my_project.udfs \
+  --udf-url 'http://private-link-endpoint:8815'
+```
+
+Then register the deployed bundle through the existing SDK client:
+
+```bash
+rw-udf register \
+  --module my_project.udfs \
+  --dsn 'risingwave://user:password@host:4566/database?sslmode=require' \
+  --udf-url 'http://private-link-endpoint:8815'
+```
+
+Fargate uses the baked, hash-bound manifest for both runtime startup and its ECS
+container health check. The deployment circuit breaker therefore rejects an
+unverifiable image, a runtime that only accepts TCP connections but is missing
+a function, or one that advertises an incompatible Arrow schema.
+
+AWS credentials and source code are not sent to RisingWave Cloud. Undeclared
+project files are not copied into the Docker context. Runtime secrets should be
+injected through AWS-managed secret integrations.
+
+Run the optional Docker end-to-end test with:
+
+```bash
+RW_LOCAL_E2E=1 uv run --extra udf pytest tests/test_udf_e2e.py
+```
 
 ## Demo
 You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).

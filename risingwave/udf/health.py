@@ -1,11 +1,14 @@
-"""Validate an Arrow Flight service against a UDF bundle manifest."""
+"""Validate an Arrow Flight service against a deployable UDF manifest."""
 
 from __future__ import annotations
 
+import argparse
+import json
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .bundle import BundleManifest, FunctionManifest
+from .bundle import BundleManifest, FunctionManifest, build_manifest, load_manifest
 from .decorators import parse_type
 
 
@@ -15,10 +18,11 @@ class FlightManifestError(RuntimeError):
 
 def _load_flight_runtime():
     try:
-        # Register arrow-udf's extension types before Flight reads schemas.
+        # Importing arrow_udf registers its JSON and decimal Arrow extension
+        # types before Flight deserializes server schemas.
         import arrow_udf  # noqa: F401
         import pyarrow as pa
-        import pyarrow.flight as flight
+        from pyarrow import flight
     except ImportError as exc:
         raise RuntimeError(
             "Arrow Flight validation requires the optional dependencies; "
@@ -106,20 +110,21 @@ def _validate_function_info(
     function: FunctionManifest,
     info: Any,
 ) -> tuple[str, ...]:
+    errors: list[str] = []
     argument_count = int(info.total_records)
     fields = tuple(info.schema)
     if argument_count != len(function.input_types):
-        return (
+        errors.append(
             f"{function.name}: expected {len(function.input_types)} arguments, "
-            f"server reports {argument_count}",
+            f"server reports {argument_count}"
         )
+        return tuple(errors)
     if len(fields) != argument_count + 1:
-        return (
+        errors.append(
             f"{function.name}: expected {argument_count + 1} Arrow fields, "
-            f"server reports {len(fields)}",
+            f"server reports {len(fields)}"
         )
-
-    errors: list[str] = []
+        return tuple(errors)
     for index, (expected, actual) in enumerate(
         zip(function.input_types, fields[:argument_count])
     ):
@@ -157,7 +162,8 @@ def validate_flight_manifest(
     ):
         raise ValueError("timeout must be positive")
     pa, flight = _load_flight_runtime()
-    client = _create_flight_client(flight, _flight_location(udf_url))
+    location = _flight_location(udf_url)
+    client = _create_flight_client(flight, location)
     options = flight.FlightCallOptions(timeout=float(timeout))
     try:
         client.wait_for_available(timeout=float(timeout))
@@ -196,3 +202,42 @@ def validate_flight_manifest(
     if errors:
         raise FlightManifestError("; ".join(errors))
     return tuple(sorted(expected_names))
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Validate a RisingWave Arrow Flight UDF service"
+    )
+    manifest_source = parser.add_mutually_exclusive_group(required=True)
+    manifest_source.add_argument("--module")
+    manifest_source.add_argument("--manifest-file", type=Path)
+    parser.add_argument("--manifest-sha256")
+    parser.add_argument("--udf-url", required=True)
+    parser.add_argument("--timeout", type=float, default=5)
+    parser.add_argument("--allow-extra-functions", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        if args.manifest_file is not None:
+            if args.manifest_sha256 is None:
+                parser.error("--manifest-sha256 is required with --manifest-file")
+            manifest = load_manifest(
+                args.manifest_file,
+                expected_sha256=args.manifest_sha256,
+            )
+        else:
+            if args.manifest_sha256 is not None:
+                parser.error("--manifest-sha256 requires --manifest-file")
+            manifest = build_manifest(args.module)
+        functions = validate_flight_manifest(
+            args.udf_url,
+            manifest,
+            timeout=args.timeout,
+            allow_extra_functions=args.allow_extra_functions,
+        )
+    except (FlightManifestError, RuntimeError, ValueError) as exc:
+        parser.exit(1, f"UDF service is not ready: {exc}\n")
+    print(json.dumps({"ready": True, "functions": functions}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

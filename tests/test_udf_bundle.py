@@ -6,7 +6,12 @@ from types import ModuleType
 import pytest
 
 from risingwave.udf import udf
-from risingwave.udf.bundle import build_manifest, discover_module_udfs
+from risingwave.udf.bundle import (
+    build_manifest,
+    discover_module_udfs,
+    load_manifest,
+    manifest_sha256,
+)
 
 
 def _module(name: str = "test_udf_bundle_module") -> ModuleType:
@@ -43,6 +48,26 @@ def test_builds_serializable_manifest(monkeypatch):
     assert manifest.functions[0].name == "policy_check"
     assert manifest.functions[0].input_types == ("VARCHAR",)
     assert '"return_type": "VARCHAR"' in manifest.to_json()
+
+
+def test_loads_only_the_exact_baked_manifest(monkeypatch, tmp_path):
+    module = _module()
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    manifest = build_manifest(module.__name__)
+    path = tmp_path / ".rw-udf-manifest.json"
+    path.write_text(manifest.to_json())
+
+    assert (
+        load_manifest(
+            path,
+            expected_sha256=manifest_sha256(manifest),
+        )
+        == manifest
+    )
+
+    path.write_text(manifest.to_json().replace("policy_check", "other"))
+    with pytest.raises(ValueError, match="does not match"):
+        load_manifest(path, expected_sha256=manifest_sha256(manifest))
 
 
 def test_empty_module_is_rejected():
