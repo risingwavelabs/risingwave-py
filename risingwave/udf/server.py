@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 from .decorators import UdfDefinition
@@ -31,7 +32,10 @@ class ArrowFlightUdfServer:
         self.port = port
         self._server: Any | None = None
         self._thread: threading.Thread | None = None
-        self._names: set[str] = set()
+        self._definitions: dict[str, UdfDefinition] = {}
+        self._wrapped: dict[str, Any] = {}
+        self._serve_error: BaseException | None = None
+        self._ready = False
 
     def _ensure_server(self):
         if self._server is None:
@@ -40,11 +44,20 @@ class ArrowFlightUdfServer:
         return self._server
 
     def add(self, definition: UdfDefinition) -> Any:
-        """Add a decorated UDF before or after the server is started."""
+        """Ensure a decorated UDF is served.
+
+        Re-adding the same definition is a no-op so callers can safely retry a
+        larger registration operation. A different definition with the same
+        handler name remains an explicit conflict because arrow-udf cannot
+        replace a function in a running server.
+        """
 
         if not isinstance(definition, UdfDefinition):
             raise TypeError("add() expects a function decorated with @udf.returns(...)")
-        if definition.name in self._names:
+        existing = self._definitions.get(definition.name)
+        if existing == definition:
+            return self._wrapped[definition.name]
+        if existing is not None:
             raise ValueError(
                 f"UDF {definition.name!r} is already registered in this process"
             )
@@ -57,25 +70,86 @@ class ArrowFlightUdfServer:
             batch=definition.batch,
         )(definition.func)
         self._ensure_server().add_function(wrapped)
-        self._names.add(definition.name)
+        self._definitions[definition.name] = definition
+        self._wrapped[definition.name] = wrapped
         return wrapped
 
-    def start(self) -> None:
-        """Start serving on a daemon thread."""
+    def _client_location(self) -> str:
+        host = self.host
+        if host == "0.0.0.0":
+            host = "127.0.0.1"
+        elif host in ("::", "[::]"):
+            host = "::1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"grpc://{host}:{self.port}"
 
-        if self._thread is not None:
+    def _serve(self, flight: Any, server: Any) -> None:
+        try:
+            flight.FlightServerBase.serve(server)
+        except BaseException as exc:
+            self._serve_error = exc
+
+    def _wait_until_ready(self, flight: Any, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        client = flight.FlightClient(self._client_location())
+        last_error: BaseException | None = None
+        while True:
+            if self._serve_error is not None:
+                raise RuntimeError("Arrow Flight server failed to start") from (
+                    self._serve_error
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Arrow Flight server did not become ready within {timeout:g}s"
+                ) from last_error
+            try:
+                client.wait_for_available(timeout=min(remaining, 0.1))
+            except Exception as exc:
+                last_error = exc
+                continue
+            if self._serve_error is not None:
+                raise RuntimeError("Arrow Flight server failed to start") from (
+                    self._serve_error
+                )
+            if self._thread is None or not self._thread.is_alive():
+                raise RuntimeError("Arrow Flight server stopped during startup")
             return
+
+    def start(self, *, timeout: float = 5) -> None:
+        """Start serving and wait until the Flight endpoint is reachable."""
+
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or timeout <= 0
+        ):
+            raise ValueError("timeout must be positive")
+        if self._ready:
+            return
+        if self._thread is not None:
+            if self._serve_error is not None:
+                raise RuntimeError("Arrow Flight server failed") from self._serve_error
+            raise RuntimeError("Arrow Flight server is already starting")
+        self._serve_error = None
         flight, _, _ = _load_arrow_runtime()
         server = self._ensure_server()
         # arrow-udf's serve() installs signal handlers, which Python forbids on
         # worker threads. The PyArrow base implementation avoids that wrapper.
         self._thread = threading.Thread(
-            target=flight.FlightServerBase.serve,
-            args=(server,),
+            target=self._serve,
+            args=(flight, server),
             name="risingwave-udf-flight",
             daemon=True,
         )
         self._thread.start()
+        try:
+            self._wait_until_ready(flight, float(timeout))
+        except BaseException:
+            self.close()
+            raise
+        self._ready = True
 
     def serve_forever(self) -> None:
         """Serve on the calling thread until the process receives a signal."""
@@ -93,7 +167,10 @@ class ArrowFlightUdfServer:
             self._thread.join(timeout=5)
         self._server = None
         self._thread = None
-        self._names.clear()
+        self._definitions.clear()
+        self._wrapped.clear()
+        self._serve_error = None
+        self._ready = False
 
     def __enter__(self) -> "ArrowFlightUdfServer":
         return self

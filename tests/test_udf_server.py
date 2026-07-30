@@ -1,7 +1,8 @@
 """Tests for the optional Arrow Flight UDF server."""
 
+import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -15,21 +16,39 @@ class FakeServer:
         self.functions = []
         self.served = False
         self.stopped = False
+        self.shutdown_event = threading.Event()
 
     def add_function(self, function):
         self.functions.append(function)
 
     def serve(self):
         self.served = True
+        self.shutdown_event.wait()
 
     def shutdown(self):
         self.stopped = True
+        self.shutdown_event.set()
 
 
 class FakeFlightServerBase:
     @staticmethod
     def serve(server):
         server.serve()
+
+
+class FakeFlightClient:
+    def __init__(self, location):
+        self.location = location
+
+    def wait_for_available(self, timeout):
+        return None
+
+
+def fake_flight():
+    return SimpleNamespace(
+        FlightClient=FakeFlightClient,
+        FlightServerBase=FakeFlightServerBase,
+    )
 
 
 def fake_arrow_udf(**options):
@@ -42,7 +61,7 @@ def fake_arrow_udf(**options):
 @patch("risingwave.udf.server._load_arrow_runtime")
 def test_add_start_and_close(load_runtime):
     load_runtime.return_value = (
-        SimpleNamespace(FlightServerBase=FakeFlightServerBase),
+        fake_flight(),
         FakeServer,
         fake_arrow_udf,
     )
@@ -53,6 +72,8 @@ def test_add_start_and_close(load_runtime):
 
     server = ArrowFlightUdfServer(host="127.0.0.1", port=8815)
     wrapped = server.add(classify)
+    assert server.add(classify) is wrapped
+    server.start()
     server.start()
     server.close()
 
@@ -66,7 +87,7 @@ def test_add_start_and_close(load_runtime):
 @patch("risingwave.udf.server._load_arrow_runtime")
 def test_rejects_duplicate_names(load_runtime):
     load_runtime.return_value = (
-        MagicMock(),
+        fake_flight(),
         FakeServer,
         fake_arrow_udf,
     )
@@ -75,10 +96,43 @@ def test_rejects_duplicate_names(load_runtime):
     def classify(value: str):
         return value
 
+    @udf.returns("varchar", name="classify")
+    def replacement(value: str):
+        return value.upper()
+
     server = ArrowFlightUdfServer()
     server.add(classify)
     with pytest.raises(ValueError, match="already registered"):
-        server.add(classify)
+        server.add(replacement)
+
+
+@patch("risingwave.udf.server._load_arrow_runtime")
+def test_start_propagates_background_server_error(load_runtime):
+    class FailingServer(FakeServer):
+        def serve(self):
+            raise OSError("address already in use")
+
+    class UnavailableFlightClient(FakeFlightClient):
+        def wait_for_available(self, timeout):
+            raise OSError("unavailable")
+
+    load_runtime.return_value = (
+        SimpleNamespace(
+            FlightClient=UnavailableFlightClient,
+            FlightServerBase=FakeFlightServerBase,
+        ),
+        FailingServer,
+        fake_arrow_udf,
+    )
+    server = ArrowFlightUdfServer()
+
+    with pytest.raises(RuntimeError, match="failed to start") as exc_info:
+        server.start()
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert "address already in use" in str(exc_info.value.__cause__)
+    assert server._server is None
+    assert server._thread is None
 
 
 def test_rejects_invalid_port_and_plain_function():
@@ -88,3 +142,5 @@ def test_rejects_invalid_port_and_plain_function():
     server = ArrowFlightUdfServer()
     with pytest.raises(TypeError, match="decorated"):
         server.add(lambda value: value)
+    with pytest.raises(ValueError, match="timeout"):
+        server.start(timeout=0)
