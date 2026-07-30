@@ -158,6 +158,24 @@ rw-udf serve --module my_project.udfs --port 8815
 Database registration and managed local/deployment workflows will be layered on
 this runtime without introducing a second RisingWave database client.
 
+### Image processing UDF example
+
+[`examples/image_udfs.py`](examples/image_udfs.py) shows how to receive an image
+stored as RisingWave `BYTEA` as Python `bytes`, decode it with Pillow, and return
+either JSON metadata or a processed image as `BYTEA`.
+
+Install Pillow alongside the UDF runtime, then inspect and serve the example:
+
+```bash
+pip install "risingwave-py[udf]" Pillow
+rw-udf manifest --module examples.image_udfs
+rw-udf serve --module examples.image_udfs --port 8815
+```
+
+Register and query the functions with the statements in
+[`examples/image_udfs.sql`](examples/image_udfs.sql). If RisingWave runs in
+Docker, replace `localhost` in the UDF links with `host.docker.internal`.
+
 ## Demo
 You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).
 
