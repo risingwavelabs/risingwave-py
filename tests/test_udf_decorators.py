@@ -5,6 +5,7 @@ from typing import Optional
 import pytest
 
 from risingwave.udf import UdfDefinition, udf
+from risingwave.udf.decorators import parse_type
 
 
 def test_infers_scalar_and_optional_types():
@@ -28,6 +29,18 @@ def test_infers_array_type():
         return len(values)
 
     assert length.input_types[0].sql == "VARCHAR[]"
+
+
+@pytest.mark.parametrize(
+    ("catalog_name", "expected"),
+    [
+        ("character varying", "VARCHAR"),
+        ("time without time zone", "TIME"),
+        ("timestamp without time zone", "TIMESTAMP"),
+    ],
+)
+def test_normalizes_catalog_type_names(catalog_name, expected):
+    assert parse_type(catalog_name).sql == expected
 
 
 def test_requires_annotations_or_explicit_types():

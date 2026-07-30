@@ -124,7 +124,7 @@ class TestInsertContext(unittest.TestCase):
 
 class TestRisingWaveConnection(unittest.TestCase):
     @patch("risingwave.udf.manager.UdfManager")
-    def test_udf_manager_is_lazy_reused_and_closed(self, manager_type):
+    def test_udf_manager_is_lazy_reused_and_outlives_connection(self, manager_type):
         raw_connection = MagicMock()
         connection = RisingWaveConnection(
             raw_connection,
@@ -137,7 +137,7 @@ class TestRisingWaveConnection(unittest.TestCase):
         connection.close()
 
         manager_type.assert_called_once_with(connection)
-        manager_type.return_value.close.assert_called_once_with()
+        manager_type.return_value.close.assert_not_called()
         raw_connection.close.assert_called_once_with()
 
     def test_execute_and_fetch_accept_parameter_mapping(self):

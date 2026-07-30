@@ -1,0 +1,198 @@
+"""Validate an Arrow Flight service against a UDF bundle manifest."""
+
+from __future__ import annotations
+
+from typing import Any
+from urllib.parse import urlsplit
+
+from .bundle import BundleManifest, FunctionManifest
+from .decorators import parse_type
+
+
+class FlightManifestError(RuntimeError):
+    """An Arrow Flight service is unavailable or has an unexpected manifest."""
+
+
+def _load_flight_runtime():
+    try:
+        # Register arrow-udf's extension types before Flight reads schemas.
+        import arrow_udf  # noqa: F401
+        import pyarrow as pa
+        import pyarrow.flight as flight
+    except ImportError as exc:
+        raise RuntimeError(
+            "Arrow Flight validation requires the optional dependencies; "
+            "install risingwave-py[udf]"
+        ) from exc
+    return pa, flight
+
+
+def _flight_location(udf_url: str) -> str:
+    if not isinstance(udf_url, str) or not udf_url.strip():
+        raise ValueError("udf_url must be a non-empty string")
+    parsed = urlsplit(udf_url)
+    schemes = {
+        "http": "grpc",
+        "https": "grpc+tls",
+        "grpc": "grpc",
+        "grpc+tls": "grpc+tls",
+    }
+    try:
+        scheme = schemes[parsed.scheme.lower()]
+    except KeyError as exc:
+        supported = ", ".join(sorted(schemes))
+        raise ValueError(
+            f"unsupported UDF URL scheme {parsed.scheme!r}; expected one of: "
+            f"{supported}"
+        ) from exc
+    if parsed.hostname is None or parsed.port is None:
+        raise ValueError("udf_url must include a host and port")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError("udf_url must not include a path, query, or fragment")
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    return f"{scheme}://{host}:{parsed.port}"
+
+
+def _expected_type_key(sql_type: str) -> tuple[Any, ...]:
+    canonical = parse_type(sql_type).sql
+    if canonical.endswith("[]"):
+        return ("list", _expected_type_key(canonical[:-2]))
+    keys = {
+        "BOOLEAN": ("boolean",),
+        "SMALLINT": ("int16",),
+        "INTEGER": ("int32",),
+        "BIGINT": ("int64",),
+        "REAL": ("float32",),
+        "DOUBLE PRECISION": ("float64",),
+        "VARCHAR": ("string",),
+        "BYTEA": ("binary",),
+        "DATE": ("date32",),
+        "TIME": ("time64", "us"),
+        "TIMESTAMP": ("timestamp", "us"),
+        "DECIMAL": ("extension", "arrowudf.decimal"),
+        "JSONB": ("extension", "arrowudf.json"),
+    }
+    return keys[canonical]
+
+
+def _actual_type_key(pa, data_type: Any) -> tuple[Any, ...]:
+    if pa.types.is_list(data_type):
+        return ("list", _actual_type_key(pa, data_type.value_type))
+    if isinstance(data_type, pa.ExtensionType):
+        return ("extension", data_type.extension_name)
+    predicates = (
+        (pa.types.is_boolean, ("boolean",)),
+        (pa.types.is_int16, ("int16",)),
+        (pa.types.is_int32, ("int32",)),
+        (pa.types.is_int64, ("int64",)),
+        (pa.types.is_float32, ("float32",)),
+        (pa.types.is_float64, ("float64",)),
+        (pa.types.is_string, ("string",)),
+        (pa.types.is_binary, ("binary",)),
+        (pa.types.is_date32, ("date32",)),
+    )
+    for predicate, key in predicates:
+        if predicate(data_type):
+            return key
+    if pa.types.is_time64(data_type):
+        return ("time64", data_type.unit)
+    if pa.types.is_timestamp(data_type):
+        return ("timestamp", data_type.unit)
+    return ("unsupported", str(data_type))
+
+
+def _validate_function_info(
+    pa,
+    function: FunctionManifest,
+    info: Any,
+) -> tuple[str, ...]:
+    argument_count = int(info.total_records)
+    fields = tuple(info.schema)
+    if argument_count != len(function.input_types):
+        return (
+            f"{function.name}: expected {len(function.input_types)} arguments, "
+            f"server reports {argument_count}",
+        )
+    if len(fields) != argument_count + 1:
+        return (
+            f"{function.name}: expected {argument_count + 1} Arrow fields, "
+            f"server reports {len(fields)}",
+        )
+
+    errors: list[str] = []
+    for index, (expected, actual) in enumerate(
+        zip(function.input_types, fields[:argument_count])
+    ):
+        if _expected_type_key(expected) != _actual_type_key(pa, actual.type):
+            errors.append(
+                f"{function.name}: argument {index + 1} expected {expected}, "
+                f"server reports {actual.type}"
+            )
+    result = fields[-1]
+    if _expected_type_key(function.return_type) != _actual_type_key(pa, result.type):
+        errors.append(
+            f"{function.name}: return type expected {function.return_type}, "
+            f"server reports {result.type}"
+        )
+    return tuple(errors)
+
+
+def _create_flight_client(flight, location: str):
+    return flight.FlightClient(location)
+
+
+def validate_flight_manifest(
+    udf_url: str,
+    manifest: BundleManifest,
+    *,
+    timeout: float = 5,
+    allow_extra_functions: bool = False,
+) -> tuple[str, ...]:
+    """Validate availability, function names, and Arrow schemas."""
+
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or timeout <= 0
+    ):
+        raise ValueError("timeout must be positive")
+    pa, flight = _load_flight_runtime()
+    client = _create_flight_client(flight, _flight_location(udf_url))
+    options = flight.FlightCallOptions(timeout=float(timeout))
+    try:
+        client.wait_for_available(timeout=float(timeout))
+        infos = tuple(client.list_flights(options=options))
+    except Exception as exc:
+        raise FlightManifestError(
+            f"cannot query Arrow Flight service at {udf_url}: {exc}"
+        ) from exc
+
+    advertised: dict[str, Any] = {}
+    for info in infos:
+        path = tuple(info.descriptor.path or ())
+        if len(path) != 1:
+            raise FlightManifestError(
+                f"server returned an invalid Flight descriptor: {path!r}"
+            )
+        name = path[0].decode("utf-8")
+        if name in advertised:
+            raise FlightManifestError(f"server advertises duplicate function {name!r}")
+        advertised[name] = info
+
+    expected_names = {function.name for function in manifest.functions}
+    advertised_names = set(advertised)
+    errors: list[str] = []
+    missing = sorted(expected_names - advertised_names)
+    if missing:
+        errors.append("missing functions: " + ", ".join(missing))
+    if not allow_extra_functions:
+        extra = sorted(advertised_names - expected_names)
+        if extra:
+            errors.append("unexpected functions: " + ", ".join(extra))
+    for function in manifest.functions:
+        info = advertised.get(function.name)
+        if info is not None:
+            errors.extend(_validate_function_info(pa, function, info))
+    if errors:
+        raise FlightManifestError("; ".join(errors))
+    return tuple(sorted(expected_names))

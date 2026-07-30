@@ -164,15 +164,29 @@ rw-udf serve --module my_project.udfs --port 8815
 ```
 
 Register a function through the same `RisingWave` connection used for SQL. With
-no URL, the SDK starts and owns a local Arrow Flight server:
+no URL, the SDK starts a development-only local Arrow Flight server:
 
 ```python
 from risingwave import RisingWave, RisingWaveConnOptions
 
 
-with RisingWave(RisingWaveConnOptions("risingwave://root@localhost:4566/dev")) as rw:
-    rw.udf.register(policy_check)
+rw = RisingWave(RisingWaveConnOptions("risingwave://root@localhost:4566/dev"))
+local_udfs = rw.udf
+local_udfs.register(policy_check)
+
+# Keep the application and local_udfs alive while queries or streaming jobs
+# can call policy_check.
+# ...
+
+rw.close()          # Closes only the database connection.
+local_udfs.close()  # Stop only after no RisingWave job uses this endpoint.
 ```
+
+The local server has an explicit lifetime because catalog functions and
+streaming jobs can outlive their registration connection. Closing the database
+connection does not stop it, and stopping it does not automatically drop
+catalog functions. For production or durable jobs, run `rw-udf serve` as a
+separately supervised service instead of using the in-process daemon.
 
 For Docker or another topology, configure the bind address and the URL visible
 to RisingWave before the first local registration:
@@ -193,7 +207,12 @@ rw.udf.register_bundle(
 ```
 
 Registration uses the existing `RisingWaveConnection`; it does not install or
-open a second database client.
+open a second database client. Before issuing DDL, it validates the complete
+Flight manifest and compares it with `SHOW FUNCTIONS`. New functions are
+created, an identical repeated registration is a no-op, and existing functions
+are never dropped automatically. A changed return type, language, or endpoint
+requires an explicit migration so dependent objects cannot be broken by a
+retry.
 
 ### Image processing UDF example
 

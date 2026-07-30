@@ -8,6 +8,7 @@ import pytest
 from risingwave.udf import udf
 from risingwave.udf.manager import (
     UdfManager,
+    UdfRegistrationConflict,
     create_function_sql,
     drop_function_sql,
 )
@@ -19,6 +20,13 @@ def _policy_check():
         return text
 
     return policy_check
+
+
+def _connection(functions=()):
+    connection = MagicMock()
+    connection.fetchone.return_value = ("public",)
+    connection.fetch.return_value = list(functions)
+    return connection
 
 
 def test_builds_external_udf_sql():
@@ -42,9 +50,13 @@ def test_escapes_link_literal():
     )
 
 
+@patch("risingwave.udf.manager.validate_flight_manifest")
 @patch("risingwave.udf.manager.ArrowFlightUdfServer")
-def test_register_starts_local_server_and_uses_existing_connection(server_type):
-    connection = MagicMock()
+def test_register_starts_local_server_and_uses_existing_connection(
+    server_type,
+    validate,
+):
+    connection = _connection()
     manager = UdfManager(connection)
     definition = _policy_check()
 
@@ -53,16 +65,17 @@ def test_register_starts_local_server_and_uses_existing_connection(server_type):
     server_type.assert_called_once_with(host="0.0.0.0", port=8815)
     server_type.return_value.add.assert_called_once_with(definition)
     server_type.return_value.start.assert_called_once_with()
-    assert connection.execute.call_args_list == [
-        (('DROP FUNCTION IF EXISTS "policy_check"(VARCHAR)',),),
-        ((ddl,),),
-    ]
+    validate.assert_called_once()
+    assert validate.call_args.args[0] == "http://127.0.0.1:8815"
+    assert validate.call_args.kwargs["allow_extra_functions"]
+    assert connection.execute.call_args_list == [((ddl,),)]
     assert ddl.endswith("USING LINK 'http://127.0.0.1:8815'")
 
 
+@patch("risingwave.udf.manager.validate_flight_manifest")
 @patch("risingwave.udf.manager.ArrowFlightUdfServer")
-def test_register_remote_does_not_start_local_server(server_type):
-    connection = MagicMock()
+def test_register_remote_does_not_start_local_server(server_type, validate):
+    connection = _connection()
     manager = UdfManager(connection)
 
     ddl = manager.register(
@@ -71,13 +84,129 @@ def test_register_remote_does_not_start_local_server(server_type):
     )
 
     server_type.assert_not_called()
-    assert connection.execute.call_count == 2
+    validate.assert_called_once()
+    assert connection.execute.call_count == 1
     assert ddl.endswith("USING LINK 'http://private-link.internal:8815'")
 
 
+@patch("risingwave.udf.manager.validate_flight_manifest")
+def test_register_is_idempotent_when_catalog_matches(validate):
+    connection = _connection(
+        [
+            (
+                "public.policy_check",
+                "character varying",
+                "character varying",
+                "",
+                "http://private-link.internal:8815",
+            )
+        ]
+    )
+    manager = UdfManager(connection)
+
+    ddl = manager.register(
+        _policy_check(),
+        udf_url="http://private-link.internal:8815",
+    )
+
+    validate.assert_called_once()
+    connection.execute.assert_not_called()
+    assert ddl == create_function_sql(
+        _policy_check(),
+        "http://private-link.internal:8815",
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "match"),
+    [
+        (
+            (
+                "public.policy_check",
+                "character varying",
+                "bigint",
+                "",
+                "http://private-link.internal:8815",
+            ),
+            "return type",
+        ),
+        (
+            (
+                "public.policy_check",
+                "character varying",
+                "character varying",
+                "python",
+                "http://private-link.internal:8815",
+            ),
+            "language",
+        ),
+        (
+            (
+                "public.policy_check",
+                "character varying",
+                "character varying",
+                "",
+                "http://old.internal:8815",
+            ),
+            "link",
+        ),
+    ],
+)
+@patch("risingwave.udf.manager.validate_flight_manifest")
+def test_register_rejects_implicit_migration(validate, row, match):
+    connection = _connection([row])
+    manager = UdfManager(connection)
+
+    with pytest.raises(UdfRegistrationConflict, match=match):
+        manager.register(
+            _policy_check(),
+            udf_url="http://private-link.internal:8815",
+        )
+
+    validate.assert_called_once()
+    connection.execute.assert_not_called()
+
+
+@patch("risingwave.udf.manager.validate_flight_manifest")
+def test_register_preflights_complete_bundle_before_ddl(validate, monkeypatch):
+    module = _bundle_module(monkeypatch, "test_udf_manager_preflight")
+    connection = _connection()
+    validate.side_effect = RuntimeError("remote manifest is invalid")
+    manager = UdfManager(connection)
+
+    with pytest.raises(RuntimeError, match="remote manifest"):
+        manager.register_bundle(
+            module.__name__,
+            udf_url="http://private-link.internal:8815",
+        )
+
+    connection.fetch.assert_not_called()
+    connection.execute.assert_not_called()
+
+
+@patch("risingwave.udf.manager.validate_flight_manifest")
 @patch("risingwave.udf.manager.ArrowFlightUdfServer")
-def test_register_bundle_adds_all_functions_before_start(server_type, monkeypatch):
-    module = ModuleType("test_udf_manager_bundle")
+def test_local_registration_can_retry_database_failure(server_type, validate):
+    connection = _connection()
+    connection.execute.side_effect = [RuntimeError("database unavailable"), None]
+    manager = UdfManager(connection)
+    definition = _policy_check()
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        manager.register(definition)
+    ddl = manager.register(definition)
+
+    assert server_type.return_value.add.call_args_list == [
+        ((definition,),),
+        ((definition,),),
+    ]
+    assert server_type.return_value.start.call_count == 2
+    assert validate.call_count == 2
+    assert connection.execute.call_args_list == [((ddl,),), ((ddl,),)]
+
+
+def _bundle_module(monkeypatch, name="test_udf_manager_bundle"):
+    module = ModuleType(name)
 
     @udf.returns("varchar")
     def first(value: str):
@@ -92,23 +221,66 @@ def test_register_bundle_adds_all_functions_before_start(server_type, monkeypatc
     module.first = first
     module.second = second
     monkeypatch.setitem(__import__("sys").modules, module.__name__, module)
-    connection = MagicMock()
+    return module
+
+
+@patch("risingwave.udf.manager.validate_flight_manifest")
+@patch("risingwave.udf.manager.ArrowFlightUdfServer")
+def test_register_bundle_adds_all_functions_before_start(
+    server_type,
+    validate,
+    monkeypatch,
+):
+    module = _bundle_module(monkeypatch)
+    connection = _connection()
     manager = UdfManager(connection)
 
     statements = manager.register_bundle(module.__name__)
 
     assert server_type.return_value.add.call_args_list == [
-        ((first,),),
-        ((second,),),
+        ((module.first,),),
+        ((module.second,),),
     ]
     server_type.return_value.start.assert_called_once_with()
+    validate.assert_called_once()
     assert len(statements) == 2
-    assert connection.execute.call_count == 4
+    assert connection.execute.call_count == 2
 
 
+@patch("risingwave.udf.manager.validate_flight_manifest")
+def test_bundle_retry_only_creates_missing_functions(validate, monkeypatch):
+    module = _bundle_module(monkeypatch, "test_udf_manager_bundle_retry")
+    connection = _connection()
+    first_row = (
+        "public.first",
+        "character varying",
+        "character varying",
+        "",
+        "http://private-link.internal:8815",
+    )
+    connection.fetch.side_effect = [[], [first_row]]
+    connection.execute.side_effect = [None, RuntimeError("DDL failed"), None]
+    manager = UdfManager(connection)
+
+    with pytest.raises(RuntimeError, match="DDL failed"):
+        manager.register_bundle(
+            module.__name__,
+            udf_url="http://private-link.internal:8815",
+        )
+    statements = manager.register_bundle(
+        module.__name__,
+        udf_url="http://private-link.internal:8815",
+    )
+
+    assert len(statements) == 1
+    assert '"second"' in statements[0]
+    assert connection.execute.call_count == 3
+
+
+@patch("risingwave.udf.manager.validate_flight_manifest")
 @patch("risingwave.udf.manager.ArrowFlightUdfServer")
-def test_configure_local_and_close(server_type):
-    manager = UdfManager(MagicMock())
+def test_configure_local_and_close(server_type, validate):
+    manager = UdfManager(_connection())
     definition = _policy_check()
 
     configured = manager.configure_local(

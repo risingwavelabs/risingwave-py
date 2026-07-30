@@ -500,21 +500,13 @@ class RisingWaveConnection:
         return result is not None
 
     def close(self):
-        # UdfManager.register() holds its own lock while calling execute().
-        # Do not hold the connection lock while closing the manager, which
-        # preserves that lock ordering. Flush while the UDF server is alive.
-        udf_manager = self._udf_manager
         try:
             with self._lock:
                 for insert_context in self._insert_ctx.values():
                     insert_context.flush()
         finally:
-            try:
-                if udf_manager is not None:
-                    udf_manager.close()
-            finally:
-                with self._lock:
-                    self.conn.close()
+            with self._lock:
+                self.conn.close()
 
     def __enter__(self):
         return self
