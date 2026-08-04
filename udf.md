@@ -345,9 +345,55 @@ def fetch_profile(user_id):
     return blocking_http_lookup(user_id)
 ```
 
-`io_threads` uses a thread pool. It does not make pure Python CPU work parallel
-because of the GIL, and it is not used when `batch=True`. Do not combine a
-non-default `io_threads` setting with batch mode.
+For a non-batch UDF, `io_threads=N` submits row calls to a thread pool with `N`
+workers. This is useful when each row waits on a blocking HTTP request,
+database, or object store. It does not make pure Python CPU work parallel
+because of the GIL, and it is not used when `batch=True`.
+
+`io_threads` is usually the wrong control for a local CLIP, PyTorch, ONNX, or
+similar model:
+
+| Inference path | Recommended execution |
+| --- | --- |
+| Blocking call to a remote inference API | Per-row `io_threads` with strict timeouts |
+| Local CPU model | `batch=True`; tune the model library's native thread pool |
+| Local GPU model | `batch=True`; normally one model process per GPU |
+| Pure Python CPU implementation | Multiple processes or container replicas |
+
+PyTorch CPU operators often release the GIL, but PyTorch already has native
+intra-op and inter-op thread pools. Adding row-level `io_threads` can multiply
+those pools, oversubscribe the laptop, and increase latency. GPU calls from
+multiple Python threads similarly do not create useful batching and can add
+contention around one model and device. Do not combine a non-default
+`io_threads` setting with batch mode.
+
+### Laptop CPU inference example
+
+[`examples/cpu_inference_udfs.py`](examples/cpu_inference_udfs.py) contains a
+tiny exported linear classifier implemented with NumPy. It deliberately has no
+GPU, model download, or training step, so it runs quickly on a laptop while
+showing the production execution pattern:
+
+- `_load_model()` is cached, creating one model instance per server process.
+- `iris_species(..., batch=True)` receives four Arrow columns as Python lists.
+- Valid rows become one NumPy matrix and run through one vectorized model call.
+- Rows containing SQL `NULL` keep their original position and return `NULL`.
+- `io_threads` is unset because this is local CPU inference, not blocking I/O.
+
+Install and serve it:
+
+```bash
+pip install "risingwave-py[udf]" numpy
+
+rw-udf manifest --module examples.cpu_inference_udfs
+rw-udf serve --module examples.cpu_inference_udfs --port 8815
+```
+
+In another terminal, run the `CREATE FUNCTION`, sample inserts, and query in
+[`examples/cpu_inference_udfs.sql`](examples/cpu_inference_udfs.sql). The model
+is intentionally tiny rather than accuracy-oriented. A production service can
+replace `_load_model()` with a serialized PyTorch, ONNX, or sklearn model while
+retaining the same batch and NULL-handling structure.
 
 For CLIP, embedding, ONNX, PyTorch, NumPy, or GPU inference:
 

@@ -179,6 +179,23 @@ Register and query the functions with the statements in
 [`examples/image_udfs.sql`](examples/image_udfs.sql). If RisingWave runs in
 Docker, replace `localhost` in the UDF links with `host.docker.internal`.
 
+### Lightweight CPU inference example
+
+[`examples/cpu_inference_udfs.py`](examples/cpu_inference_udfs.py) runs a tiny
+NumPy classifier as one vectorized call per Arrow batch. It needs no GPU or
+model download and demonstrates one model instance per server process, NULL
+preservation, and why local model inference uses `batch=True` rather than
+`io_threads`:
+
+```bash
+pip install "risingwave-py[udf]" numpy
+rw-udf manifest --module examples.cpu_inference_udfs
+rw-udf serve --module examples.cpu_inference_udfs --port 8815
+```
+
+Register and query it with
+[`examples/cpu_inference_udfs.sql`](examples/cpu_inference_udfs.sql).
+
 ## Demo
 You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).
 
