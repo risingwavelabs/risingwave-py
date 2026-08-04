@@ -131,6 +131,9 @@ rw.insert(table_name="test_product", data=test_df3)
 Python UDF support lives in the same `risingwave-py` SDK and uses
 `arrow-udf` as an optional Arrow Flight runtime:
 
+See the complete [Python UDF guide](udf.md) for type mapping, Arrow Flight
+operation, image and model inference, scaling, testing, and troubleshooting.
+
 ```bash
 pip install "risingwave-py[udf]"
 ```
