@@ -138,6 +138,11 @@ operation, image and model inference, scaling, testing, and troubleshooting.
 pip install "risingwave-py[udf]"
 ```
 
+The `examples` modules below are source-tree examples; they are included in the
+source distribution but deliberately not installed in the wheel. Run their
+commands from a repository checkout, or copy the examples into your own
+importable project.
+
 Define UDFs in a normal Python module:
 
 ```python
@@ -177,7 +182,8 @@ rw-udf serve --module examples.image_udfs --port 8815
 
 Register and query the functions with the statements in
 [`examples/image_udfs.sql`](examples/image_udfs.sql). If RisingWave runs in
-Docker, replace `localhost` in the UDF links with `host.docker.internal`.
+Docker, start the server with `--host 0.0.0.0` and replace `localhost` in the
+UDF links with `host.docker.internal`.
 
 ### Lightweight CPU inference example
 

@@ -39,7 +39,7 @@ def test_builds_serializable_manifest(monkeypatch):
     manifest = build_manifest(module.__name__)
 
     assert manifest.protocol == "arrow-flight"
-    assert manifest.protocol_version == 1
+    assert manifest.protocol_version == 2
     assert manifest.functions[0].name == "policy_check"
     assert manifest.functions[0].input_types == ("VARCHAR",)
     assert '"return_type": "VARCHAR"' in manifest.to_json()

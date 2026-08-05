@@ -6,7 +6,7 @@ import sys
 from types import ModuleType
 
 from risingwave.udf import udf
-from risingwave.udf.cli import main
+from risingwave.udf.cli import _parser, main
 
 
 def test_manifest_command(monkeypatch, capsys, tmp_path):
@@ -52,3 +52,9 @@ def test_imports_do_not_eagerly_load_arrow_runtime():
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_serve_defaults_to_loopback():
+    args = _parser().parse_args(["serve", "--module", "example.udfs"])
+
+    assert args.host == "127.0.0.1"

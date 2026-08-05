@@ -25,14 +25,13 @@ jobs:
 
       - name: Sync environment
         run: |
-          uv sync
+          uv sync --extra udf
 
       - name: Run checks
         run: |
           uv run ruff format --check risingwave tests
           uv run ruff check risingwave tests
           uv run pytest -q
-          uv run --extra udf python -c "import arrow_udf, pyarrow"
 
       - name: Build package
         run: |
@@ -40,4 +39,22 @@ jobs:
 
       - name: Verify build artifacts
         run: |
-          ls -la dist/
+          uv run python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          sdist = next(Path("dist").glob("*.tar.gz"))
+          wheel = next(Path("dist").glob("*.whl"))
+          with tarfile.open(sdist) as archive:
+              sdist_files = archive.getnames()
+          with zipfile.ZipFile(wheel) as archive:
+              wheel_files = archive.namelist()
+          assert any(name.endswith("/examples/image_udfs.py") for name in sdist_files)
+          assert any(
+              name.endswith("/examples/cpu_inference_udfs.py")
+              for name in sdist_files
+          )
+          assert not any(name.startswith("examples/") for name in wheel_files)
+          assert any(name == "risingwave/udf/server.py" for name in wheel_files)
+          PY

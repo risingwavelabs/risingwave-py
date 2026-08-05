@@ -77,11 +77,16 @@ def test_add_start_and_close(load_runtime):
     server.start()
     server.close()
 
+    server.start()
+    assert len(server._server.functions) == 1
+    server.close()
+
     assert wrapped.options["input_types"] == ["VARCHAR"]
     assert wrapped.options["result_type"] == "VARCHAR"
     assert wrapped.options["io_threads"] == 2
     assert server._server is None
     assert server._thread is None
+    assert server._definitions == {"classify": classify}
 
 
 @patch("risingwave.udf.server._load_arrow_runtime")
@@ -126,6 +131,12 @@ def test_start_propagates_background_server_error(load_runtime):
     )
     server = ArrowFlightUdfServer()
 
+    @udf.returns("varchar")
+    def classify(value: str):
+        return value
+
+    server.add(classify)
+
     with pytest.raises(RuntimeError, match="failed to start") as exc_info:
         server.start()
 
@@ -133,6 +144,52 @@ def test_start_propagates_background_server_error(load_runtime):
     assert "address already in use" in str(exc_info.value.__cause__)
     assert server._server is None
     assert server._thread is None
+    assert server._definitions == {"classify": classify}
+
+
+@patch("risingwave.udf.server._load_arrow_runtime")
+def test_brackets_ipv6_bind_and_client_locations(load_runtime):
+    load_runtime.return_value = (
+        fake_flight(),
+        FakeServer,
+        fake_arrow_udf,
+    )
+
+    @udf.returns("varchar")
+    def classify(value: str):
+        return value
+
+    server = ArrowFlightUdfServer(host="::1", port=8817)
+    server.add(classify)
+
+    assert server._server.location == "[::1]:8817"
+    assert server._client_location() == "grpc://[::1]:8817"
+    server.close()
+
+
+def test_close_reports_a_thread_that_did_not_stop():
+    class StuckThread:
+        def join(self, timeout):
+            self.timeout = timeout
+
+        def is_alive(self):
+            return True
+
+    server = ArrowFlightUdfServer()
+    flight_server = FakeServer("127.0.0.1:8815")
+    thread = StuckThread()
+    server._server = flight_server
+    server._thread = thread
+    server._ready = True
+
+    with pytest.raises(RuntimeError, match="did not stop within 5 seconds"):
+        server.close()
+
+    assert flight_server.stopped is True
+    assert thread.timeout == 5
+    assert server._server is flight_server
+    assert server._thread is thread
+    assert server._ready is False
 
 
 def test_rejects_invalid_port_and_plain_function():
@@ -140,6 +197,7 @@ def test_rejects_invalid_port_and_plain_function():
         ArrowFlightUdfServer(port=0)
 
     server = ArrowFlightUdfServer()
+    assert server.host == "127.0.0.1"
     with pytest.raises(TypeError, match="decorated"):
         server.add(lambda value: value)
     with pytest.raises(ValueError, match="timeout"):

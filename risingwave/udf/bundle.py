@@ -24,7 +24,7 @@ class BundleManifest:
     module: str
     functions: tuple[FunctionManifest, ...]
     protocol: str = "arrow-flight"
-    protocol_version: int = 1
+    protocol_version: int = 2
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"

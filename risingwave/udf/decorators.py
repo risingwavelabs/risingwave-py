@@ -147,15 +147,30 @@ class _UdfNamespace:
 
         def decorate(func: Callable[..., Any]) -> UdfDefinition:
             signature = inspect.signature(func)
-            type_hints = get_type_hints(func)
+            parameters = tuple(signature.parameters.values())
+            for parameter in parameters:
+                if parameter.kind not in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                ):
+                    raise TypeError("UDFs only support positional parameters")
             if input_types is None:
+                annotations = {
+                    parameter.name: parameter.annotation
+                    for parameter in parameters
+                    if parameter.annotation is not inspect.Parameter.empty
+                }
+
+                def input_annotations() -> None:
+                    pass
+
+                input_annotations.__annotations__ = annotations
+                type_hints = get_type_hints(
+                    input_annotations,
+                    globalns=func.__globals__,
+                )
                 inferred: list[TypeSpec] = []
-                for parameter in signature.parameters.values():
-                    if parameter.kind not in (
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    ):
-                        raise TypeError("UDFs only support positional parameters")
+                for parameter in parameters:
                     annotation = type_hints.get(parameter.name, parameter.annotation)
                     if annotation is inspect.Parameter.empty:
                         raise TypeError(
@@ -165,7 +180,7 @@ class _UdfNamespace:
                     inferred.append(infer_type(annotation))
                 resolved_inputs = tuple(inferred)
             else:
-                if len(input_types) != len(signature.parameters):
+                if len(input_types) != len(parameters):
                     raise TypeError(
                         "input_types count must match the Python function parameters"
                     )

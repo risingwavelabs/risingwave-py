@@ -47,6 +47,35 @@ def test_explicit_input_types():
     assert parse_json.return_type.arrow == "JSONB"
 
 
+def test_explicit_types_reject_non_positional_callable_shapes():
+    with pytest.raises(TypeError, match="only support positional"):
+
+        @udf.returns("varchar", input_types=["bigint"])
+        def keyword_only(*, value):
+            return str(value)
+
+    with pytest.raises(TypeError, match="only support positional"):
+
+        @udf.returns("varchar", input_types=["bigint"])
+        def variadic(*values):
+            return str(values)
+
+
+def test_resolves_only_annotations_needed_for_input_inference():
+    @udf.returns("varchar")
+    def inferred(value: str) -> "MissingReturnType":  # noqa: F821
+        return value
+
+    @udf.returns("varchar", input_types=["varchar"])
+    def explicit(
+        value: "MissingInputType",  # noqa: F821
+    ) -> "MissingReturnType":  # noqa: F821
+        return value
+
+    assert inferred.input_types[0].sql == "VARCHAR"
+    assert explicit.input_types[0].sql == "VARCHAR"
+
+
 def test_rejects_invalid_options():
     with pytest.raises(ValueError, match="invalid UDF name"):
 

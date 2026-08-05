@@ -35,8 +35,12 @@ Add application-specific libraries separately. For the image example:
 pip install "risingwave-py[udf]" Pillow
 ```
 
-The core SDK remains usable without the UDF extra. Arrow and PyArrow are loaded
-only when the server runtime is needed.
+The core SDK remains usable without the UDF extra. The UDF implementation does
+not import `arrow_udf` or `pyarrow.flight` until the server runtime is needed.
+
+Repository examples are included in the source distribution but deliberately
+excluded from the installed wheel. Run `examples.*` commands from a source
+checkout, or copy the example module into your own importable project.
 
 ## 2. Define an importable UDF bundle
 
@@ -178,13 +182,17 @@ Serve every decorated definition owned by a module:
 ```bash
 rw-udf serve \
   --module my_project.udfs \
-  --host 0.0.0.0 \
   --port 8815
 ```
 
 `rw-udf serve` stays in the foreground and starts one Python process. Keep that
 process alive for as long as any query, materialized view, or streaming job uses
 its functions.
+
+The library and CLI default to `127.0.0.1`. Binding to all interfaces executes
+arbitrary UDF code for any client that can reach the port, so use
+`--host 0.0.0.0` only when a container or remote host must connect and the
+network boundary is protected.
 
 Use a process supervisor, container runtime, or orchestration platform for
 long-running jobs. A supervisor should restart a failed process and remove an
@@ -197,13 +205,19 @@ not merely from the shell that starts the UDF server.
 
 - RisingWave on the same host can normally use `http://127.0.0.1:8815`.
 - RisingWave in Docker usually needs `http://host.docker.internal:8815` plus a
-  host-gateway mapping on Linux.
+  host-gateway mapping on Linux; start the UDF server with
+  `--host 0.0.0.0` explicitly.
 - Separate machines or containers need a private DNS name or load-balancer
   address routable from RisingWave.
 - A developer-laptop address is generally not reachable from RisingWave Cloud.
 
 Binding the server to `0.0.0.0` makes it listen on all interfaces; it does not
 make the address routable or secure by itself.
+
+When embedding `ArrowFlightUdfServer` in tests or development tools, `close()`
+stops the transport but retains its definitions, so a later `start()` serves
+the same functions. It raises rather than silently discarding state when the
+background thread cannot stop within the bounded shutdown wait.
 
 ## 5. Register and call functions in SQL
 

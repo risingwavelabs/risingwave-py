@@ -21,7 +21,7 @@ def _parser() -> argparse.ArgumentParser:
 
     server = commands.add_parser("serve", help="Serve a bundle over Arrow Flight")
     server.add_argument("--module", required=True)
-    server.add_argument("--host", default="0.0.0.0")
+    server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8815)
     server.add_argument("--project-root", type=Path, default=Path.cwd())
     return parser

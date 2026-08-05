@@ -25,7 +25,7 @@ def _load_arrow_runtime():
 class ArrowFlightUdfServer:
     """Serve UDF definitions in the foreground or on a background thread."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8815) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8815) -> None:
         if not 1 <= port <= 65535:
             raise ValueError("port must be between 1 and 65535")
         self.host = host
@@ -37,10 +37,33 @@ class ArrowFlightUdfServer:
         self._serve_error: BaseException | None = None
         self._ready = False
 
+    def _server_location(self) -> str:
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{host}:{self.port}"
+
+    @staticmethod
+    def _wrap_definition(arrow_udf: Any, definition: UdfDefinition) -> Any:
+        return arrow_udf(
+            input_types=[value.arrow for value in definition.input_types],
+            result_type=definition.return_type.arrow,
+            name=definition.name,
+            io_threads=definition.io_threads,
+            batch=definition.batch,
+        )(definition.func)
+
     def _ensure_server(self):
         if self._server is None:
-            _, server_type, _ = _load_arrow_runtime()
-            self._server = server_type(location=f"{self.host}:{self.port}")
+            _, server_type, arrow_udf = _load_arrow_runtime()
+            server = server_type(location=self._server_location())
+            wrapped: dict[str, Any] = {}
+            for definition in self._definitions.values():
+                function = self._wrap_definition(arrow_udf, definition)
+                server.add_function(function)
+                wrapped[definition.name] = function
+            self._server = server
+            self._wrapped = wrapped
         return self._server
 
     def add(self, definition: UdfDefinition) -> Any:
@@ -56,19 +79,14 @@ class ArrowFlightUdfServer:
             raise TypeError("add() expects a function decorated with @udf.returns(...)")
         existing = self._definitions.get(definition.name)
         if existing == definition:
+            self._ensure_server()
             return self._wrapped[definition.name]
         if existing is not None:
             raise ValueError(
                 f"UDF {definition.name!r} is already registered in this process"
             )
         _, _, arrow_udf = _load_arrow_runtime()
-        wrapped = arrow_udf(
-            input_types=[value.arrow for value in definition.input_types],
-            result_type=definition.return_type.arrow,
-            name=definition.name,
-            io_threads=definition.io_threads,
-            batch=definition.batch,
-        )(definition.func)
+        wrapped = self._wrap_definition(arrow_udf, definition)
         self._ensure_server().add_function(wrapped)
         self._definitions[definition.name] = definition
         self._wrapped[definition.name] = wrapped
@@ -159,18 +177,21 @@ class ArrowFlightUdfServer:
         self._ensure_server().serve()
 
     def close(self) -> None:
-        """Stop the server and release its background thread."""
+        """Stop the transport while retaining definitions for a safe restart."""
 
+        self._ready = False
         if self._server is not None:
             self._server.shutdown()
         if self._thread is not None:
             self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                raise RuntimeError(
+                    "Arrow Flight server thread did not stop within 5 seconds"
+                )
         self._server = None
         self._thread = None
-        self._definitions.clear()
         self._wrapped.clear()
         self._serve_error = None
-        self._ready = False
 
     def __enter__(self) -> "ArrowFlightUdfServer":
         return self
