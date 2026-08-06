@@ -32,7 +32,8 @@ jobs:
       - name: Run demo (smoke test)
         run: |
           # Run the demo with a timeout to prevent it from running indefinitely
-          timeout 30s uv run examples/demo.py ${{ matrix.demo }} || code=$?
+          timeout 30s uv run --no-default-groups --group example-demo \
+            examples/demo.py ${{ matrix.demo }} || code=$?
           if [ $code -eq 124 ]; then
             # If the command timed out (code 124), that's expected since the demo runs continuously
             echo "Demo ran successfully for 30 seconds"

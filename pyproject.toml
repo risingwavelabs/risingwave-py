@@ -58,11 +58,18 @@ rw-udf = "risingwave.udf.cli:main"
 
 [dependency-groups]
 dev = [
-    "pillow>=10.4",
-    "psycopg2-binary>=2.9.9",
     "pytest>=8.3",
     "ruff>=0.12",
+]
+example-cpu-inference-udf = [
+    "numpy",
+]
+example-demo = [
+    "psycopg2-binary>=2.9.9",
     "websocket-client>=1.8.0",
+]
+example-image-udf = [
+    "pillow>=10.4",
 ]
 
 

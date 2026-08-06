@@ -29,10 +29,12 @@ UDFs:
 pip install "risingwave-py[udf]"
 ```
 
-Add application-specific libraries separately. For the image example:
+Application-specific libraries stay separate from the runtime. Repository
+examples declare independent uv dependency groups in the root project. For the
+image example:
 
 ```bash
-pip install "risingwave-py[udf]" Pillow
+uv sync --no-default-groups --group example-image-udf --extra udf
 ```
 
 The core SDK remains usable without the UDF extra. The UDF implementation does
@@ -324,8 +326,10 @@ thumbnail as `BYTEA`:
 Run it with:
 
 ```bash
-rw-udf manifest --module examples.image_udfs
-rw-udf serve --module examples.image_udfs --port 8815
+uv run --no-default-groups --group example-image-udf --extra udf \
+  rw-udf manifest --module examples.image_udfs
+uv run --no-default-groups --group example-image-udf --extra udf \
+  rw-udf serve --module examples.image_udfs --port 8815
 ```
 
 Treat binary decoders as an untrusted-input boundary. Set size limits before
@@ -397,10 +401,10 @@ showing the production execution pattern:
 Install and serve it:
 
 ```bash
-pip install "risingwave-py[udf]" numpy
-
-rw-udf manifest --module examples.cpu_inference_udfs
-rw-udf serve --module examples.cpu_inference_udfs --port 8815
+uv run --no-default-groups --group example-cpu-inference-udf --extra udf \
+  rw-udf manifest --module examples.cpu_inference_udfs
+uv run --no-default-groups --group example-cpu-inference-udf --extra udf \
+  rw-udf serve --module examples.cpu_inference_udfs --port 8815
 ```
 
 In another terminal, run the `CREATE FUNCTION`, sample inserts, and query in
@@ -496,7 +500,10 @@ The repository test suite covers decorator validation, discovery, retry-safe
 server startup, bounded readiness, Arrow registration, and the image example:
 
 ```bash
-uv run --extra udf pytest -q
+uv run --extra udf \
+  --group example-image-udf \
+  --group example-cpu-inference-udf \
+  pytest -q
 ```
 
 ## 10. Troubleshooting

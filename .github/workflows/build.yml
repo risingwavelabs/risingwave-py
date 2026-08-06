@@ -25,13 +25,18 @@ jobs:
 
       - name: Sync environment
         run: |
-          uv sync --extra udf
+          uv sync --extra udf \
+            --group example-image-udf \
+            --group example-cpu-inference-udf
 
       - name: Run checks
         run: |
           uv run ruff format --check risingwave tests
           uv run ruff check risingwave tests
-          uv run pytest -q
+          uv run --extra udf \
+            --group example-image-udf \
+            --group example-cpu-inference-udf \
+            pytest -q
 
       - name: Build package
         run: |

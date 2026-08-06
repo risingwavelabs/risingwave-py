@@ -1,4 +1,6 @@
--- `rw-udf serve --module examples.cpu_inference_udfs --port 8815`
+-- Run from the repository root:
+-- uv run --no-default-groups --group example-cpu-inference-udf --extra udf \
+--   rw-udf serve --module examples.cpu_inference_udfs --port 8815
 CREATE FUNCTION iris_species(REAL, REAL, REAL, REAL) RETURNS VARCHAR
 AS iris_species
 USING LINK 'http://localhost:8815';

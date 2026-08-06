@@ -739,13 +739,21 @@ udf = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "psycopg2-binary" },
     { name = "pytest", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pytest", version = "9.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "ruff" },
+]
+example-cpu-inference-udf = [
+    { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "numpy", version = "2.2.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+]
+example-demo = [
+    { name = "psycopg2-binary" },
     { name = "websocket-client" },
+]
+example-image-udf = [
+    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
 ]
 
 [package.metadata]
@@ -759,12 +767,15 @@ provides-extras = ["udf"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pillow", specifier = ">=10.4" },
-    { name = "psycopg2-binary", specifier = ">=2.9.9" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "ruff", specifier = ">=0.12" },
+]
+example-cpu-inference-udf = [{ name = "numpy" }]
+example-demo = [
+    { name = "psycopg2-binary", specifier = ">=2.9.9" },
     { name = "websocket-client", specifier = ">=1.8.0" },
 ]
+example-image-udf = [{ name = "pillow", specifier = ">=10.4" }]
 
 [[package]]
 name = "ruff"

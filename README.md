@@ -172,12 +172,14 @@ this runtime without introducing a second RisingWave database client.
 stored as RisingWave `BYTEA` as Python `bytes`, decode it with Pillow, and return
 either JSON metadata or a processed image as `BYTEA`.
 
-Install Pillow alongside the UDF runtime, then inspect and serve the example:
+Run it from the repository root with only the image example and UDF runtime
+dependencies selected:
 
 ```bash
-pip install "risingwave-py[udf]" Pillow
-rw-udf manifest --module examples.image_udfs
-rw-udf serve --module examples.image_udfs --port 8815
+uv run --no-default-groups --group example-image-udf --extra udf \
+  rw-udf manifest --module examples.image_udfs
+uv run --no-default-groups --group example-image-udf --extra udf \
+  rw-udf serve --module examples.image_udfs --port 8815
 ```
 
 Register and query the functions with the statements in
@@ -194,9 +196,10 @@ preservation, and why local model inference uses `batch=True` rather than
 `io_threads`:
 
 ```bash
-pip install "risingwave-py[udf]" numpy
-rw-udf manifest --module examples.cpu_inference_udfs
-rw-udf serve --module examples.cpu_inference_udfs --port 8815
+uv run --no-default-groups --group example-cpu-inference-udf --extra udf \
+  rw-udf manifest --module examples.cpu_inference_udfs
+uv run --no-default-groups --group example-cpu-inference-udf --extra udf \
+  rw-udf serve --module examples.cpu_inference_udfs --port 8815
 ```
 
 Register and query it with
@@ -207,8 +210,8 @@ You can also check the demo in our [repo](https://github.com/risingwavelabs/risi
 
 ```shell
 # Run the simple demo
-uv run examples/demo.py simple
+uv run --no-default-groups --group example-demo examples/demo.py simple
 
 # Run the Binance demo
-uv run examples/demo.py boll
+uv run --no-default-groups --group example-demo examples/demo.py boll
 ```
