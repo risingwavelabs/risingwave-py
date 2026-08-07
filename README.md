@@ -126,13 +126,92 @@ rw.insert(table_name="test_product", data=test_df3)
 ### You should be able to see the changes in for product and product avg price console now!
 ```
 
+## Python UDF definitions
+
+Python UDF support lives in the same `risingwave-py` SDK and uses
+`arrow-udf` as an optional Arrow Flight runtime:
+
+See the complete [Python UDF guide](udf.md) for type mapping, Arrow Flight
+operation, image and model inference, scaling, testing, and troubleshooting.
+
+```bash
+pip install "risingwave-py[udf]"
+```
+
+The `examples` modules below are source-tree examples; they are included in the
+source distribution but deliberately not installed in the wheel. Run their
+commands from a repository checkout, or copy the examples into your own
+importable project.
+
+Define UDFs in a normal Python module:
+
+```python
+from risingwave.udf import udf
+
+
+@udf.returns("varchar")
+def policy_check(text: str):
+    if text and "missing signature" in text.lower():
+        return "missing_signature"
+    return None
+```
+
+Inspect or serve all decorated functions owned by that module:
+
+```bash
+rw-udf manifest --module my_project.udfs
+rw-udf serve --module my_project.udfs --port 8815
+```
+
+Database registration and managed local/deployment workflows will be layered on
+this runtime without introducing a second RisingWave database client.
+
+### Image processing UDF example
+
+[`examples/image_udfs.py`](examples/image_udfs.py) shows how to receive an image
+stored as RisingWave `BYTEA` as Python `bytes`, decode it with Pillow, and return
+either JSON metadata or a processed image as `BYTEA`.
+
+Run it from the repository root with only the image example and UDF runtime
+dependencies selected:
+
+```bash
+uv run --no-default-groups --group example-image-udf --extra udf \
+  rw-udf manifest --module examples.image_udfs
+uv run --no-default-groups --group example-image-udf --extra udf \
+  rw-udf serve --module examples.image_udfs --port 8815
+```
+
+Register and query the functions with the statements in
+[`examples/image_udfs.sql`](examples/image_udfs.sql). If RisingWave runs in
+Docker, start the server with `--host 0.0.0.0` and replace `localhost` in the
+UDF links with `host.docker.internal`.
+
+### Lightweight CPU inference example
+
+[`examples/cpu_inference_udfs.py`](examples/cpu_inference_udfs.py) runs a tiny
+NumPy classifier as one vectorized call per Arrow batch. It needs no GPU or
+model download and demonstrates one model instance per server process, NULL
+preservation, and why local model inference uses `batch=True` rather than
+`io_threads`:
+
+```bash
+uv run --no-default-groups --group example-cpu-inference-udf --extra udf \
+  rw-udf manifest --module examples.cpu_inference_udfs
+uv run --no-default-groups --group example-cpu-inference-udf --extra udf \
+  rw-udf serve --module examples.cpu_inference_udfs --port 8815
+```
+
+Register and query it with
+[`examples/cpu_inference_udfs.sql`](examples/cpu_inference_udfs.sql).
+
 ## Demo
 You can also check the demo in our [repo](https://github.com/risingwavelabs/risingwave-py).
 
 ```shell
 # Run the simple demo
-uv run examples/demo.py simple
+uv run --no-default-groups --group example-demo examples/demo.py simple
 
 # Run the Binance demo
-uv run examples/demo.py boll
+uv run --no-default-groups --group example-demo examples/demo.py boll
 ```
